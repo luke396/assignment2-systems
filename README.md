@@ -20,7 +20,7 @@ Then follow the rest of the assignment instructions in `README.original.md`.
 
 ### benchmarking_script
 
-[benchmark_basic_results](output/benchmark_results.md) is the output on a single RTX 5090 32G. `nan` indicates OOM.
+[benchmark_basic_results](result/benchmark_results_rtx5090.md) is the output from a single RTX 5090 32G run; `nan` indicates OOM.
 
 Using 5 warmup steps and 10 measured steps, at seq_len=512 the small/medium configs average 0.018s/0.050s forward and 0.061s/0.178s forward+backward (std <= 0.0038s), so the backward component is roughly 0.043s/0.128s. Large OOM at seq_len=512; at seq_len=256 large averages 0.056s forward and 0.208s forward+backward (std ~= 0.002s), while xl/2.7B only ran forward at seq_len=128 (0.065s/0.084s).
 
