@@ -30,6 +30,8 @@ Without warm-up, variance is huge (e.g., small seq_len=512 has std 0.212s FWD / 
 
 ### nsys_profile
 
+> This section's reults basing `torch.optim.Adam` and `torch.nn.CrossEntropyLoss`, not expected `cs336_basics` version.
+
 > When the `.nsysrep` file is generated under WSL2, opening it in the Windows UI can cause the `Stats System` view to fail. Copy the `.nsysrep` file to the Windows filesystem before opening it.
 
 Using the medium config with seq_len=128 and 5 warmup steps as an example, [benchmark_nsys_profile_results](result/benchmark_results_nsys.md) shows total F+B cost 2.3811s and warmup F+B cost 1.1835s. That implies a steady-state F+B cost of about 1.1976s over 10 steps, or 0.1198s/step. (source: `result/benchmark_results_nsys.md`)
@@ -127,6 +129,8 @@ Ops
 (source: `output/nsys/benchmark__fix_annotation__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report nvtx_gpu_proj_sum --filter-nvtx forward`)
 
 In a single forward pass, softmax time is 17.56ms vs matrix multiplications at (22.329ms + 1.079ms) = 23.408ms, so softmax is about 75% of matmul time.
+
+> In really `cs336_basics.AdamW` and `cs336_basics.CrossEntropyLoss`, the time is 1.397 ms vs (2.335 ms + 650.908 μs) = 2.985 ms, so softmax is about 46.8% of matmul time. (source `output/nsys/benchmark__self_adamw_entropy__medium__FWD__seq128__warm5.nsys-rep`)
 
 For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%.
 

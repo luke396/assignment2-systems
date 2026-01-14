@@ -3,11 +3,13 @@
 import argparse
 import statistics
 import timeit
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from cs336_basics import blocks
 from cs336_basics.blocks import TransformerLM
+from cs336_basics.training_utility import AdamW, cross_entropy
 from torch.cuda import nvtx
 
 from cs336_systems.nvtx_model import annotated_scaled_dot_product_attention
@@ -95,12 +97,15 @@ def select_benchmark_device() -> torch.device:
 
 def _setup_training(
     model: torch.nn.Module, *, forward_only: bool, lr: float, weight_decay: float
-) -> tuple[torch.optim.Optimizer | None, torch.nn.Module | None]:
+) -> tuple[
+    torch.optim.Optimizer | None,
+    Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None,
+]:
     """Create optimizer and loss function unless running forward-only."""
     if forward_only:
         return None, None
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = cross_entropy
     return optimizer, loss_fn
 
 
@@ -110,7 +115,7 @@ def _run_steps(
     device: torch.device,
     run_inputs: RunInputs,
     optimizer: torch.optim.Optimizer | None,
-    loss_fn: torch.nn.Module | None,
+    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None,
 ) -> tuple[list[float], float, float]:
     """Run benchmark steps and return timing stats."""
     step_times: list[float] = []
