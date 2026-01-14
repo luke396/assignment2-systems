@@ -28,10 +28,6 @@ INDEX_COLS = [
     "Config",
     "Seq Len",
     "Warmup Steps",
-    "d_model",
-    "d_ff",
-    "n_layers",
-    "num_heads",
 ]
 VALUE_COLS = [
     "Result",
@@ -108,6 +104,12 @@ def _benchmark_cmd(
     return cmd
 
 
+def _maybe_enable_nvtx_attention(cmd: list[str], *, enable: bool) -> list[str]:
+    if enable:
+        return [*cmd, "--nvtx-attn"]
+    return cmd
+
+
 def _nsys_cmd(report_prefix: Path, delay: float) -> list[str]:
     cmd = [
         "nsys",
@@ -150,10 +152,6 @@ def _base_row(
         "Mode": MODE_LABELS[forward_only],
         "Seq Len": context_length,
         "Warmup Steps": warmup_steps,
-        "d_model": config.d_model,
-        "d_ff": config.d_ff,
-        "n_layers": config.n_layers,
-        "num_heads": config.num_heads,
     }
 
 
@@ -226,6 +224,7 @@ def run_benchmark(
         context_length=context_length,
         warmup_steps=warmup_steps,
     )
+    cmd = _maybe_enable_nvtx_attention(cmd, enable=options.nsys)
 
     if options.nsys:
         report_prefix = _build_nsys_report_prefix(
@@ -317,10 +316,6 @@ def _format_results(df: pd.DataFrame) -> pd.DataFrame:
         "Config",
         "Seq Len",
         "Warmup Steps",
-        "d_model",
-        "d_ff",
-        "n_layers",
-        "num_heads",
     ]
     return df.sort_values(sort_cols, kind="stable", ignore_index=True)
 
@@ -386,10 +381,24 @@ def main() -> None:
         raise RuntimeError(msg)
 
     results = []
-
+    if options.nsys:
+        iter_items = {
+            "forward_only": True,
+            "context_length": False,
+            "warmup_steps": False,
+        }
+    else:
+        iter_items = {
+            "forward_only": True,
+            "context_length": True,
+            "warmup_steps": True,
+        }
+    forward_options = (True,) if iter_items["forward_only"] else (True, False)
+    content_options = SEQ_LENGTHS if iter_items["context_length"] else (SEQ_LENGTHS[0],)
+    warmup_options = WARMUP_STEPS if iter_items["warmup_steps"] else (WARMUP_STEPS[-1],)
     for config in CONFIGS:
         for forward_only, context_length, warmup_steps in product(
-            (True, False), SEQ_LENGTHS, WARMUP_STEPS
+            forward_options, content_options, warmup_options
         ):
             results.append(
                 _run_case(

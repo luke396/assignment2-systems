@@ -6,8 +6,11 @@ import timeit
 from dataclasses import dataclass
 
 import torch
+from cs336_basics import blocks
 from cs336_basics.blocks import TransformerLM
 from torch.cuda import nvtx
+
+from cs336_systems.nvtx_model import annotated_scaled_dot_product_attention
 
 
 @dataclass
@@ -25,6 +28,7 @@ class Config:
     weight_decay: float = 1e-2
     warm_up_steps: int = 5
     forward_only: bool = False
+    nvtx_attn: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,11 @@ def parse_cli_args() -> Config:
     parser.add_argument("--weight_decay", type=float, default=defaults.weight_decay)
     parser.add_argument("--warm_up_steps", type=int, default=defaults.warm_up_steps)
     parser.add_argument("--forward_only", action="store_true")
+    parser.add_argument(
+        "--nvtx-attn",
+        action="store_true",
+        help="Enable NVTX ranges inside scaled dot-product attention.",
+    )
     return Config(**vars(parser.parse_args()))
 
 
@@ -171,7 +180,8 @@ def run_basic_benchmark_default() -> None:
         seed=args.seed,
     )
     device = select_benchmark_device()
-
+    if args.nvtx_attn and device.type == "cuda":
+        blocks.scaled_dot_product_attention = annotated_scaled_dot_product_attention  # type: ignore[assignment]
     model = TransformerLM(
         vocab_size=run_inputs.vocab_size,
         d_model=args.d_model,
