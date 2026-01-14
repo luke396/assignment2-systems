@@ -143,3 +143,89 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
+
+#### Addendum: Multi-size Comparison Summary
+
+Only seq_len=128 has nsys outputs in `output/nsys`; seq_len=256/512/1024 are not analyzed (no nsys output). F+B runs for xl/2.7B are OOM in `benchmark_results_nsys.md`, so any F+B-derived metrics are marked N/A.
+
+(a) Forward timing (seq_len=128)
+
+| Config | FWD steady (ms/step, NVTX) | Python avg/step FWD (ms) | Ratio |
+| :----- | -------------------------: | -----------------------: | ----: |
+| small  |                       20.4 |                     10.9 | 1.87x |
+| medium |                       28.2 |                     21.8 | 1.29x |
+| large  |                       45.8 |                     39.2 | 1.17x |
+| xl     |              N/A (F+B OOM) |                     65.4 |     - |
+| 2.7B   |              N/A (F+B OOM) |                     83.8 |     - |
+
+- NVTX forward time is higher than Python timing by ~1.17–1.87x (gap shrinks with size).
+
+(source: `output/nsys/benchmark__20260113_105512__{small,medium,large}__FWD_BWD__seq128__warm5.nsys-rep`, `result/benchmark_results_rtx5090.md`, `result/benchmark_results_nsys.md`, `nsys stats --report nvtx_sum`)
+
+(b) Top kernel in forward pass (seq_len=128)
+
+| Config | Top forward kernel                                            | Instances / forward | Same as F+B top? |
+| :----- | :------------------------------------------------------------ | ------------------: | :--------------- |
+| small  | cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1> |                  60 | yes              |
+| medium | cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1> |                 120 | no               |
+| large  | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 109 | yes              |
+| xl     | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 145 | N/A (F+B OOM)    |
+| 2.7B   | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 224 | N/A (F+B OOM)    |
+
+- Forward top kernels are always GEMM; only medium differs from the F+B top kernel in the non-OOM runs.
+
+(source: `output/nsys/benchmark__20260113_105512__{small,medium,large,xl,2.7B}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`, `nsys stats --report cuda_gpu_kern_sum`)
+
+(c) Non-GEMM kernels in forward pass (seq_len=128)
+
+| Config | Top non-GEMM kernel              | Time % |
+| :----- | :------------------------------- | -----: |
+| small  | elementwise_kernel (direct_copy) |   1.9% |
+| medium | elementwise_kernel (direct_copy) |   2.1% |
+| large  | elementwise_kernel (direct_copy) |   1.7% |
+| xl     | elementwise_kernel (direct_copy) |   1.5% |
+| 2.7B   | elementwise_kernel (mul)         |   1.0% |
+
+- Non-GEMM time is consistently small (~1–2%) and dominated by elementwise kernels.
+
+(source: `output/nsys/benchmark__20260113_105512__{small,medium,large,xl,2.7B}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`)
+
+(d) GEMM share: inference vs training (seq_len=128)
+
+Inference (forward-only), GEMM share of kernel time:
+
+| Config | GEMM share (kernel time) |
+| :----- | -----------------------: |
+| small  |                    88.0% |
+| medium |                    87.0% |
+| large  |                    89.6% |
+| xl     |                    91.3% |
+| 2.7B   |                    94.4% |
+
+Training (F+B), GEMM share of kernel time and optimizer share:
+
+| Config | GEMM share (kernel time) | multi_tensor_apply (total GPU) |
+| :----- | -----------------------: | -----------------------------: |
+| small  |                    51.4% |                          27.5% |
+| medium |                    46.7% |                          31.6% |
+| large  |                    45.8% |                          30.8% |
+| xl     |            N/A (F+B OOM) |                              - |
+| 2.7B   |            N/A (F+B OOM) |                              - |
+
+- GEMM share drops from ~87–90% (inference) to ~46–51% (training), while optimizer kernels take ~28–32% of total GPU time.
+
+(source: `output/nsys/benchmark__forward_only__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `output/nsys/benchmark__20260113_105512__{small,medium,large}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum`, `nsys stats --report cuda_gpu_sum`, OOM status from `result/benchmark_results_nsys.md`)
+
+(e) Softmax vs matmul in self-attention (seq_len=128)
+
+| Config | Softmax (ms) | Matmul (scores+final) (ms) | Softmax/Matmul |
+| :----- | -----------: | -------------------------: | -------------: |
+| small  |         25.2 |                       22.3 |          1.13x |
+| medium |         17.6 |                       23.4 |          0.75x |
+| large  |         22.8 |                       20.2 |          1.13x |
+| xl     |         35.2 |                       39.7 |          0.89x |
+| 2.7B   |         20.7 |                       20.7 |          1.00x |
+
+- Softmax runtime is comparable to matmul across sizes (0.75–1.13x), far above its FLOPs ratio; with `cs336_basics`, softmax/matmul spans ~0.70–1.12x across sizes.
+
+(source: `output/nsys/benchmark__fix_annotation__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `output/nsys/benchmark__self_adamw_entropy__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `nsys stats --report nvtx_gpu_proj_sum --filter-nvtx forward`)
