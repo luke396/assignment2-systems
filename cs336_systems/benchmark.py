@@ -4,6 +4,7 @@ import argparse
 import statistics
 import timeit
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -31,6 +32,7 @@ class Config:
     warm_up_steps: int = 5
     forward_only: bool = False
     nvtx_attn: bool = False
+    autocast: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class RunInputs:
     steps: int
     warm_up_steps: int
     seed: int
+    autocast: bool = False
 
 
 def parse_cli_args() -> Config:
@@ -64,6 +67,11 @@ def parse_cli_args() -> Config:
         "--nvtx-attn",
         action="store_true",
         help="Enable NVTX ranges inside scaled dot-product attention.",
+    )
+    parser.add_argument(
+        "--autocast",
+        action="store_true",
+        help="Enable autocasting for CUDA.",
     )
     return Config(**vars(parser.parse_args()))
 
@@ -121,6 +129,14 @@ def _run_steps(
     step_times: list[float] = []
     start = timeit.default_timer()
     warm_up_end = start
+    cast = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if run_inputs.autocast
+        else nullcontext()
+    )
+
+    is_cuda = device.type == "cuda"
+    nvtx_range = nvtx.range if is_cuda else nullcontext
 
     model.train()
     for step in range(run_inputs.steps):
@@ -134,27 +150,22 @@ def _run_steps(
             device=device,
         )
 
-        if device.type == "cuda":
-            with nvtx.range("forward"):  # profile the forward pass
+        with cast:
+            with nvtx_range("forward"):
                 logit = model(data)
-        else:
-            logit = model(data)
+            if optimizer is not None and loss_fn is not None:
+                loss = loss_fn(
+                    logit.view(-1, run_inputs.vocab_size), data.view(-1)
+                )
 
         if optimizer is not None and loss_fn is not None:
-            if device.type == "cuda":
-                with nvtx.range("backward"):  # profile the backward pass
-                    optimizer.zero_grad()
-                    loss = loss_fn(logit.view(-1, run_inputs.vocab_size), data.view(-1))
-                    loss.backward()
-                with nvtx.range("optimizer_step"):  # profile the optimizer step
-                    optimizer.step()
-            else:
+            with nvtx_range("backward"):
                 optimizer.zero_grad()
-                loss = loss_fn(logit.view(-1, run_inputs.vocab_size), data.view(-1))
                 loss.backward()
+            with nvtx_range("optimizer_step"):
                 optimizer.step()
 
-        if device.type == "cuda":
+        if is_cuda:
             torch.cuda.synchronize()
 
         step_end = timeit.default_timer()
@@ -183,6 +194,7 @@ def run_basic_benchmark_default() -> None:
         steps=args.steps,
         warm_up_steps=args.warm_up_steps,
         seed=args.seed,
+        autocast=args.autocast,
     )
     device = select_benchmark_device()
     if args.nvtx_attn and device.type == "cuda":

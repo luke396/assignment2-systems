@@ -143,3 +143,123 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
+
+### mixed_precision_accumulation
+
+```python
+import torch
+
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float32)
+print(s)  # tensor(10.0001)
+
+s = torch.tensor(0, dtype=torch.float16)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float16)
+print(s)  # tensor(9.9531, dtype=torch.float16)
+
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float16)
+print(s)  # tensor(10.0021)
+
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    x = torch.tensor(0.01, dtype=torch.float16)
+    s += x.type(torch.float32)
+print(s)  # tensor(10.0021)
+```
+
+### benchmarking_mixed_precision
+
+(a)
+
+Auto cast with `torch.float16`:
+
+```
+Paramater's dtype in autocast: torch.float32
+Output of fc1 dtype : torch.float16
+Output of fc2 dtype : torch.float16
+Output of relu dtype : torch.float16
+Output of ln dtype : torch.float32
+Model's logits dtype : torch.float16
+Loss dtype : torch.float32
+Gradient dtype of first layer weights: torch.float32
+```
+
+Auto cast with `torch.bfloat16`:
+
+```
+Paramater's dtype in autocast: torch.float32
+Output of fc1 dtype : torch.bfloat16
+Output of fc2 dtype : torch.bfloat16
+Output of relu dtype : torch.bfloat16
+Output of ln dtype : torch.float32
+Model's logits dtype : torch.bfloat16
+Loss dtype : torch.float32
+Gradient dtype of first layer weights: torch.float32
+```
+
+(b)
+
+The reason layerNorm remaing float32 is that layerNorm involves reductions (mean/stddev) which can lose precision in float16; PyTorch's autocast keeps such ops in float32 to maintain numerical stability.
+
+Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTorch autocast conservatively keeps LayerNorm in float32 for both FP16 and BF16. Theoretically BF16 could be used for LayerNorm, but the precision loss (7 mantissa bits vs 23) may affect training stability.
+
+(c)
+
+[analyze_mixed_precision.py](scripts/analyze_mixed_precision.py)
+
+> Note: autocast only wraps the forward pass and loss computation; backward pass runs outside autocast (gradients are computed in the appropriate dtype automatically).
+
+```shell
+## Forward Pass Comparison (Median Time in ms)
+
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 75.40 | 79.35 | 0.95x |
+| medium | 95.23 | 103.34 | 0.92x |
+| large | 120.83 | 123.42 | 0.98x |
+| xl | 149.19 | 146.84 | 1.02x |
+| 2.7B | 156.09 | 629.84 (OOM) | - |
+
+## Forward+Backward Pass Comparison (Median Time in ms)
+
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 96.08 | 105.35 | 0.91x |
+| medium | 132.39 | 141.50 | 0.94x |
+| large | 167.90 | 180.92 | 0.93x |
+| xl | 817.06 | 925.99 | 0.88x |
+| 2.7B | 809.29 | 855.10 | 0.95x |
+
+## Attention Score Computation (Median Time in ms)
+
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 0.30 | 0.23 | 1.34x |
+| medium | 0.23 | 0.19 | 1.20x |
+| large | 0.33 | 0.17 | 1.91x |
+| xl | 0.53 | 0.18 | 2.89x |
+| 2.7B | 1.67 | 0.50 | 3.31x |
+
+## Conclusions
+
+Top 5 kernels in BF16 autocast F+B (medium model):
+
+| Time | Name |
+| --- | --- |
+| 12.1% | elementwise_kernel (direct_copy_kernel_cuda) - type conversion |
+| 9.0% | vectorized_elementwise_kernel (add) |
+| 8.2% | vectorized_elementwise_kernel (mul) |
+| 4.9% | cutlass wmma_tensorop_bf16 gemm (nt) |
+| 4.7% | cutlass wmma_tensorop_bf16 gemm (nn) |
+
+1. BF16 mixed precision is slower (5-12%) on small-medium models
+   due to autocast type conversion overhead (copy kernels dominate)
+2. Attention score computation shows 1.2x-3.3x speedup with BF16
+   larger models benefit more from reduced precision matmul
+3. As model size increases, BF16 disadvantage decreases
+   because compute time dominates conversion overhead
+```
