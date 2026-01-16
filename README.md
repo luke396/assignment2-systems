@@ -4,7 +4,7 @@ This repo uses a git submodule for the Assignment 1 basics implementation.
 
 - The original assignment README is preserved in `README.original.md`.
 - The `cs336-basics` directory is a submodule pointing to
-  https://github.com/luke396/assignment1-basics.
+  [assignment1-basics repository](https://github.com/luke396/assignment1-basics).
 
 ## Setup
 
@@ -84,7 +84,7 @@ Training (forward + backward), top 5. GEMM kernels (rows 1-3 and 5) account for 
 
 Inference (forward only): kernels account for 53.8% of total time. (source: `output/nsys/benchmark__forward_only__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
 
-```
+```shell
 85.6% Kernel2 (GEMM)           → matrix multiplication for forward/backward
 5.8%  elementwise_kernel       → activations, copy, etc.
 5.0%  vectorized_elementwise   → vectorized elementwise ops
@@ -92,7 +92,7 @@ Inference (forward only): kernels account for 53.8% of total time. (source: `out
 
 Training (forward + backward): kernels account for 85.1% of total time. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
 
-```
+```shell
 46.0% Kernel2 (GEMM)           → matrix multiplication for forward/backward
 37.2% multi_tensor_apply       → optimizer parameter updates
 10.2% elementwise_kernel       → activations, copy, etc.
@@ -136,7 +136,7 @@ For one head and one batch, softmax FLOPs per row is 5mn; across attention this 
 
 The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
-```
+```shell
 m x (n-1)  get row max
 m x n      minus max
 m x n      exp
@@ -177,7 +177,7 @@ print(s)  # tensor(10.0021)
 
 Auto cast with `torch.float16`:
 
-```
+```shell
 Paramater's dtype in autocast: torch.float32
 Output of fc1 dtype : torch.float16
 Output of fc2 dtype : torch.float16
@@ -190,7 +190,7 @@ Gradient dtype of first layer weights: torch.float32
 
 Auto cast with `torch.bfloat16`:
 
-```
+```shell
 Paramater's dtype in autocast: torch.float32
 Output of fc1 dtype : torch.bfloat16
 Output of fc2 dtype : torch.bfloat16
