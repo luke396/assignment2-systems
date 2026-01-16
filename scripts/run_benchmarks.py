@@ -61,6 +61,8 @@ class RunOptions:
     nsys_delay: float
     run_tag: str | None
     output_dir: Path
+    autocast: bool
+    forward_only: bool = True
 
 
 def _extract_float(pattern: str, text: str) -> float | None:
@@ -80,7 +82,12 @@ def _nsys_available() -> bool:
 
 
 def _benchmark_cmd(
-    config: ModelConfig, *, forward_only: bool, context_length: int, warmup_steps: int
+    config: ModelConfig,
+    *,
+    forward_only: bool,
+    context_length: int,
+    warmup_steps: int,
+    autocast: bool = False,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -101,6 +108,8 @@ def _benchmark_cmd(
     ]
     if forward_only:
         cmd.append("--forward_only")
+    if autocast:
+        cmd.append("--autocast")
     return cmd
 
 
@@ -223,6 +232,7 @@ def run_benchmark(
         forward_only=forward_only,
         context_length=context_length,
         warmup_steps=warmup_steps,
+        autocast=options.autocast,
     )
     cmd = _maybe_enable_nvtx_attention(cmd, enable=options.nsys)
 
@@ -353,6 +363,16 @@ def _parse_args() -> RunOptions:
         default=None,
         help="Optional tag added to output filenames (auto when --nsys).",
     )
+    parser.add_argument(
+        "--autocast",
+        action="store_true",
+        help="Enable autocasting for CUDA.",
+    )
+    parser.add_argument(
+        "--forward-only",
+        action="store_true",
+        help="Run only forward pass benchmarks.",
+    )
     args = parser.parse_args()
 
     run_tag = args.run_tag
@@ -370,6 +390,8 @@ def _parse_args() -> RunOptions:
         nsys_delay=args.nsys_delay,
         run_tag=run_tag,
         output_dir=output_dir,
+        autocast=args.autocast,
+        forward_only=args.forward_only,
     )
 
 
@@ -381,21 +403,15 @@ def main() -> None:
         raise RuntimeError(msg)
 
     results = []
+    # nsys mode: single config (first seq, last warmup); otherwise full grid
     if options.nsys:
-        iter_items = {
-            "forward_only": True,
-            "context_length": False,
-            "warmup_steps": False,
-        }
+        forward_options = (True,) if options.forward_only else (True, False)
+        content_options = (SEQ_LENGTHS[0],)
+        warmup_options = (WARMUP_STEPS[-1],)
     else:
-        iter_items = {
-            "forward_only": True,
-            "context_length": True,
-            "warmup_steps": True,
-        }
-    forward_options = (True,) if iter_items["forward_only"] else (True, False)
-    content_options = SEQ_LENGTHS if iter_items["context_length"] else (SEQ_LENGTHS[0],)
-    warmup_options = WARMUP_STEPS if iter_items["warmup_steps"] else (WARMUP_STEPS[-1],)
+        forward_options = (True,)
+        content_options = SEQ_LENGTHS
+        warmup_options = WARMUP_STEPS
     for config in CONFIGS:
         for forward_only, context_length, warmup_steps in product(
             forward_options, content_options, warmup_options
