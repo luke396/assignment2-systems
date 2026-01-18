@@ -20,6 +20,12 @@
 ## Version Control
 
 - Use separate branches or `git worktree` for AI coding changes, based on the task.
+- Commit message format: `type: description`
+  - `bench:` - benchmark related changes
+  - `docs:` - documentation
+  - `chore:` - miscellaneous (config, deps, etc.)
+  - `fix:` - bug fixes
+  - `feat:` - new features (non-benchmark)
 
 ## Communication
 

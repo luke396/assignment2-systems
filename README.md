@@ -4,7 +4,7 @@ This repo uses a git submodule for the Assignment 1 basics implementation.
 
 - The original assignment README is preserved in `README.original.md`.
 - The `cs336-basics` directory is a submodule pointing to
-  https://github.com/luke396/assignment1-basics.
+  [assignment1-basics repository](https://github.com/luke396/assignment1-basics).
 
 ## Setup
 
@@ -84,7 +84,7 @@ Training (forward + backward), top 5. GEMM kernels (rows 1-3 and 5) account for 
 
 Inference (forward only): kernels account for 53.8% of total time. (source: `output/nsys/benchmark__forward_only__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
 
-```
+```shell
 85.6% Kernel2 (GEMM)           → matrix multiplication for forward/backward
 5.8%  elementwise_kernel       → activations, copy, etc.
 5.0%  vectorized_elementwise   → vectorized elementwise ops
@@ -92,7 +92,7 @@ Inference (forward only): kernels account for 53.8% of total time. (source: `out
 
 Training (forward + backward): kernels account for 85.1% of total time. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
 
-```
+```shell
 46.0% Kernel2 (GEMM)           → matrix multiplication for forward/backward
 37.2% multi_tensor_apply       → optimizer parameter updates
 10.2% elementwise_kernel       → activations, copy, etc.
@@ -136,7 +136,7 @@ For one head and one batch, softmax FLOPs per row is 5mn; across attention this 
 
 The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
-```
+```shell
 m x (n-1)  get row max
 m x n      minus max
 m x n      exp
@@ -144,88 +144,122 @@ m x (n-1)  get sum
 m x n      divide
 ```
 
-#### Addendum: Multi-size Comparison Summary
+### mixed_precision_accumulation
 
-Only seq_len=128 has nsys outputs in `output/nsys`; seq_len=256/512/1024 are not analyzed (no nsys output). F+B runs for xl/2.7B are OOM in `benchmark_results_nsys.md`, so any F+B-derived metrics are marked N/A.
+```python
+import torch
 
-(a) Forward timing (seq_len=128)
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float32)
+print(s)  # tensor(10.0001)
 
-| Config | FWD steady (ms/step, NVTX) | Python avg/step FWD (ms) | Ratio |
-| :----- | -------------------------: | -----------------------: | ----: |
-| small  |                       20.4 |                     10.9 | 1.87x |
-| medium |                       28.2 |                     21.8 | 1.29x |
-| large  |                       45.8 |                     39.2 | 1.17x |
-| xl     |              N/A (F+B OOM) |                     65.4 |     - |
-| 2.7B   |              N/A (F+B OOM) |                     83.8 |     - |
+s = torch.tensor(0, dtype=torch.float16)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float16)
+print(s)  # tensor(9.9531, dtype=torch.float16)
 
-- NVTX forward time is higher than Python timing by ~1.17–1.87x (gap shrinks with size).
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    s += torch.tensor(0.01, dtype=torch.float16)
+print(s)  # tensor(10.0021)
 
-(source: `output/nsys/benchmark__20260113_105512__{small,medium,large}__FWD_BWD__seq128__warm5.nsys-rep`, `result/benchmark_results_rtx5090.md`, `result/benchmark_results_nsys.md`, `nsys stats --report nvtx_sum`)
+s = torch.tensor(0, dtype=torch.float32)
+for i in range(1000):
+    x = torch.tensor(0.01, dtype=torch.float16)
+    s += x.type(torch.float32)
+print(s)  # tensor(10.0021)
+```
 
-(b) Top kernel in forward pass (seq_len=128)
+### benchmarking_mixed_precision
 
-| Config | Top forward kernel                                            | Instances / forward | Same as F+B top? |
-| :----- | :------------------------------------------------------------ | ------------------: | :--------------- |
-| small  | cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1> |                  60 | yes              |
-| medium | cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1> |                 120 | no               |
-| large  | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 109 | yes              |
-| xl     | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 145 | N/A (F+B OOM)    |
-| 2.7B   | cutlass::Kernel2<cutlass_80_simt_sgemm_128x256_8x4_tn_align1> |                 224 | N/A (F+B OOM)    |
+(a)
 
-- Forward top kernels are always GEMM; only medium differs from the F+B top kernel in the non-OOM runs.
+Auto cast with `torch.float16`:
 
-(source: `output/nsys/benchmark__20260113_105512__{small,medium,large,xl,2.7B}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`, `nsys stats --report cuda_gpu_kern_sum`)
+```shell
+Paramater's dtype in autocast: torch.float32
+Output of fc1 dtype : torch.float16
+Output of fc2 dtype : torch.float16
+Output of relu dtype : torch.float16
+Output of ln dtype : torch.float32
+Model's logits dtype : torch.float16
+Loss dtype : torch.float32
+Gradient dtype of first layer weights: torch.float32
+```
 
-(c) Non-GEMM kernels in forward pass (seq_len=128)
+Auto cast with `torch.bfloat16`:
 
-| Config | Top non-GEMM kernel              | Time % |
-| :----- | :------------------------------- | -----: |
-| small  | elementwise_kernel (direct_copy) |   1.9% |
-| medium | elementwise_kernel (direct_copy) |   2.1% |
-| large  | elementwise_kernel (direct_copy) |   1.7% |
-| xl     | elementwise_kernel (direct_copy) |   1.5% |
-| 2.7B   | elementwise_kernel (mul)         |   1.0% |
+```shell
+Paramater's dtype in autocast: torch.float32
+Output of fc1 dtype : torch.bfloat16
+Output of fc2 dtype : torch.bfloat16
+Output of relu dtype : torch.bfloat16
+Output of ln dtype : torch.float32
+Model's logits dtype : torch.bfloat16
+Loss dtype : torch.float32
+Gradient dtype of first layer weights: torch.float32
+```
 
-- Non-GEMM time is consistently small (~1–2%) and dominated by elementwise kernels.
+(b)
 
-(source: `output/nsys/benchmark__20260113_105512__{small,medium,large,xl,2.7B}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`)
+The reason layerNorm remaing float32 is that layerNorm involves reductions (mean/stddev) which can lose precision in float16; PyTorch's autocast keeps such ops in float32 to maintain numerical stability.
 
-(d) GEMM share: inference vs training (seq_len=128)
+Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTorch autocast conservatively keeps LayerNorm in float32 for both FP16 and BF16. Theoretically BF16 could be used for LayerNorm, but the precision loss (7 mantissa bits vs 23) may affect training stability.
 
-Inference (forward-only), GEMM share of kernel time:
+(c)
 
-| Config | GEMM share (kernel time) |
-| :----- | -----------------------: |
-| small  |                    88.0% |
-| medium |                    87.0% |
-| large  |                    89.6% |
-| xl     |                    91.3% |
-| 2.7B   |                    94.4% |
+[analyze_mixed_precision.py](scripts/analyze_mixed_precision.py)
 
-Training (F+B), GEMM share of kernel time and optimizer share:
+> Note: autocast only wraps the forward pass and loss computation; backward pass runs outside autocast (gradients are computed in the appropriate dtype automatically).
 
-| Config | GEMM share (kernel time) | multi_tensor_apply (total GPU) |
-| :----- | -----------------------: | -----------------------------: |
-| small  |                    51.4% |                          27.5% |
-| medium |                    46.7% |                          31.6% |
-| large  |                    45.8% |                          30.8% |
-| xl     |            N/A (F+B OOM) |                              - |
-| 2.7B   |            N/A (F+B OOM) |                              - |
+```shell
+## Forward Pass Comparison (Median Time in ms)
 
-- GEMM share drops from ~87–90% (inference) to ~46–51% (training), while optimizer kernels take ~28–32% of total GPU time.
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 75.40 | 79.35 | 0.95x |
+| medium | 95.23 | 103.34 | 0.92x |
+| large | 120.83 | 123.42 | 0.98x |
+| xl | 149.19 | 146.84 | 1.02x |
+| 2.7B | 156.09 | 629.84 (OOM) | - |
 
-(source: `output/nsys/benchmark__forward_only__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `output/nsys/benchmark__20260113_105512__{small,medium,large}__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum`, `nsys stats --report cuda_gpu_sum`, OOM status from `result/benchmark_results_nsys.md`)
+## Forward+Backward Pass Comparison (Median Time in ms)
 
-(e) Softmax vs matmul in self-attention (seq_len=128)
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 96.08 | 105.35 | 0.91x |
+| medium | 132.39 | 141.50 | 0.94x |
+| large | 167.90 | 180.92 | 0.93x |
+| xl | 817.06 | 925.99 | 0.88x |
+| 2.7B | 809.29 | 855.10 | 0.95x |
 
-| Config | Softmax (ms) | Matmul (scores+final) (ms) | Softmax/Matmul |
-| :----- | -----------: | -------------------------: | -------------: |
-| small  |         25.2 |                       22.3 |          1.13x |
-| medium |         17.6 |                       23.4 |          0.75x |
-| large  |         22.8 |                       20.2 |          1.13x |
-| xl     |         35.2 |                       39.7 |          0.89x |
-| 2.7B   |         20.7 |                       20.7 |          1.00x |
+## Attention Score Computation (Median Time in ms)
 
-- Softmax runtime is comparable to matmul across sizes (0.75–1.13x), far above its FLOPs ratio; with `cs336_basics`, softmax/matmul spans ~0.70–1.12x across sizes.
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 0.30 | 0.23 | 1.34x |
+| medium | 0.23 | 0.19 | 1.20x |
+| large | 0.33 | 0.17 | 1.91x |
+| xl | 0.53 | 0.18 | 2.89x |
+| 2.7B | 1.67 | 0.50 | 3.31x |
 
-(source: `output/nsys/benchmark__fix_annotation__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `output/nsys/benchmark__self_adamw_entropy__{small,medium,large,xl,2.7B}__FWD__seq128__warm5.nsys-rep`, `nsys stats --report nvtx_gpu_proj_sum --filter-nvtx forward`)
+## Conclusions
+
+Top 5 kernels in BF16 autocast F+B (medium model):
+
+| Time | Name |
+| --- | --- |
+| 12.1% | elementwise_kernel (direct_copy_kernel_cuda) - type conversion |
+| 9.0% | vectorized_elementwise_kernel (add) |
+| 8.2% | vectorized_elementwise_kernel (mul) |
+| 4.9% | cutlass wmma_tensorop_bf16 gemm (nt) |
+| 4.7% | cutlass wmma_tensorop_bf16 gemm (nn) |
+
+1. BF16 mixed precision is slower (5-12%) on small-medium models
+   due to autocast type conversion overhead (copy kernels dominate)
+2. Attention score computation shows 1.2x-3.3x speedup with BF16
+   larger models benefit more from reduced precision matmul
+3. As model size increases, BF16 disadvantage decreases
+   because compute time dominates conversion overhead
+```
