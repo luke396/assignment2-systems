@@ -8,8 +8,8 @@
 
 ## Code Quality
 
-- For modified code only, `uv run ruff check <paths>` must pass with no warnings.
-- For modified code only, `uv run ty check <paths>` must pass with no type errors.
+- For modified code only, `run ruff check <paths>` must pass with no warnings.
+- For modified code only, `run ty check <paths>` must pass with no type errors.
 - Do not suppress linter/type checker errors (e.g., `# noqa`, `# type: ignore`) unless it is best practice; if suppression is necessary, add a comment explaining the reason.
 
 ## Workflow
