@@ -30,111 +30,208 @@ Without warm-up, variance is huge (e.g., small seq_len=512 has std 0.212s FWD / 
 
 ### nsys_profile
 
-> This section's reults basing `torch.optim.Adam` and `torch.nn.CrossEntropyLoss`, not expected `cs336_basics` version.
-
 > When the `.nsysrep` file is generated under WSL2, opening it in the Windows UI can cause the `Stats System` view to fail. Copy the `.nsysrep` file to the Windows filesystem before opening it.
-
-Using the medium config with seq_len=128 and 5 warmup steps as an example, [benchmark_nsys_profile_results](result/benchmark_results_nsys.md) shows total F+B cost 2.3811s and warmup F+B cost 1.1835s. That implies a steady-state F+B cost of about 1.1976s over 10 steps, or 0.1198s/step. (source: `result/benchmark_results_nsys.md`)
-
-In benchmark_basic_results, the same config shows total F+B cost 1.949s and warmup F+B cost 0.9369s, so the steady average is 1.0121s over 10 steps, or 0.1012s/step. (source: `result/benchmark_results_rtx5090.md`)
-
-The nsys run is about 18% slower. This can be profiling overhead and/or run-to-run variance.
 
 (a) Forward timing from NVTX
 
-From the nsys profile (medium + seq_len=128 + 5 warmup), the total forward time based on NVTX is 761.613ms across 15 instances. The maximum is 366.601ms at the first step; the remaining steps are stable. Excluding that first outlier, the average forward time is (761.613 - 366.601) / 14 = 28ms. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report nvtx_sum`)
+| Model  | seq128 | seq256 | seq512 | seq1024 |
+| ------ | ------ | ------ | ------ | ------- |
+| small  | 75.04  | 82.42  | 81.12  | 108.34  |
+| medium | 93.19  | 98.42  | 117.96 | OOM     |
+| large  | 113.67 | 128.50 | OOM    | OOM     |
+| xl     | 141.89 | OOM    | OOM    | OOM     |
+| 2.7B   | 154.74 | OOM    | OOM    | OOM     |
 
-Comparing to the benchmark forward-only result for the same config (which may differ slightly because it includes data generation), the average forward time is 21.8ms, which is lower than the nsys result. A reasonable explanation is profiling overhead and run-to-run variance; the NVTX ranges are measured under the profiler and can be slower even if the benchmark uses `torch.cuda.synchronize()`.
+The time of nsys is a little slower than python version. A reasonable explanation is profiling overhead and run-to-run variance; the NVTX ranges are measured under the profiler and can be slower even if the benchmark uses `torch.cuda.synchronize()`.
 
 (b) Dominant kernels
 
-During the full F+B process, `cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nt_align1>(T1::Params)` totals 113.704ms across 2535 instances (12.1%). (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum`)
+> iteration 6
 
-Within a single forward pass, `cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1>(T1::Params)` has 120 instances totaling 6.408ms (48.8%), the largest cumulative GPU time in forward. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`)
+small Top Kernel per Pass
 
-Within a single backward pass, `cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nt_align1>(T1::Params)` totals 7.570ms (28.9%) across 169 instances; this is the same kernel that dominates the full process. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx backward`)
+| Seq Len | Inference Forward                    | Training Forward                     | Training Backward                    |
+| ------- | ------------------------------------ | ------------------------------------ | ------------------------------------ |
+| seq128  | void cutlass::Kernel2<cut... (58.2%) | void cutlass::Kernel2<cut... (58.3%) | void cutlass::Kernel2<cut... (17.0%) |
+| seq256  | void cutlass::Kernel2<cut... (52.5%) | void cutlass::Kernel2<cut... (52.6%) | void cutlass::Kernel2<cut... (24.0%) |
+| seq512  | void cutlass::Kernel2<cut... (72.1%) | void cutlass::Kernel2<cut... (71.0%) | void cutlass::Kernel2<cut... (25.6%) |
+| seq1024 | void cutlass::Kernel2<cut... (40.8%) | void cutlass::Kernel2<cut... (41.3%) | void cutlass::Kernel2<cut... (15.2%) |
+
+medium Top Kernel per Pass
+
+| Seq Len | Inference Forward                    | Training Forward                     | Training Backward                    |
+| ------- | ------------------------------------ | ------------------------------------ | ------------------------------------ |
+| seq128  | void cutlass::Kernel2<cut... (48.6%) | void cutlass::Kernel2<cut... (49.2%) | void cutlass::Kernel2<cut... (29.4%) |
+| seq256  | void cutlass::Kernel2<cut... (56.6%) | void cutlass::Kernel2<cut... (56.2%) | void cutlass::Kernel2<cut... (25.7%) |
+| seq512  | void cutlass::Kernel2<cut... (50.5%) | void cutlass::Kernel2<cut... (48.8%) | void cutlass::Kernel2<cut... (26.9%) |
+| seq1024 | OOM                                  | OOM                                  | OOM                                  |
+
+large Top Kernel per Pass
+
+| Seq Len | Inference Forward                    | Training Forward                     | Training Backward                    |
+| ------- | ------------------------------------ | ------------------------------------ | ------------------------------------ |
+| seq128  | void cutlass::Kernel2<cut... (56.1%) | void cutlass::Kernel2<cut... (55.5%) | void cutlass::Kernel2<cut... (29.6%) |
+| seq256  | void cutlass::Kernel2<cut... (60.0%) | void cutlass::Kernel2<cut... (59.6%) | void cutlass::Kernel2<cut... (25.2%) |
+| seq512  | OOM                                  | OOM                                  | OOM                                  |
+| seq1024 | OOM                                  | OOM                                  | OOM                                  |
+
+xl Top Kernel per Pass
+
+| Seq Len | Inference Forward                    | Training Forward | Training Backward |
+| ------- | ------------------------------------ | ---------------- | ----------------- |
+| seq128  | void cutlass::Kernel2<cut... (60.4%) | OOM              | OOM               |
+| seq256  | OOM                                  | OOM              | OOM               |
+| seq512  | OOM                                  | OOM              | OOM               |
+| seq1024 | OOM                                  | OOM              | OOM               |
+
+2.7B Top Kernel per Pass
+
+| Seq Len | Inference Forward                    | Training Forward | Training Backward |
+| ------- | ------------------------------------ | ---------------- | ----------------- |
+| seq128  | void cutlass::Kernel2<cut... (93.2%) | OOM              | OOM               |
+| seq256  | OOM                                  | OOM              | OOM               |
+| seq512  | OOM                                  | OOM              | OOM               |
+| seq1024 | OOM                                  | OOM              | OOM               |
+
+The domain kernal is always GEMM for matrix multiplication. Forward's GEMM radio is larger than backward's because backward has more non-GEMM kernels (e.g., elementwise ops for gradients). As seq_len increases, non-GEMM kernels (e.g., elementwise ops) become more prominent due to more activations and intermediate results.
 
 (c) Non-GEMM kernels
 
-The kernels above are GEMM (matrix multiplication) variants. In the forward pass, the first non-GEMM kernel is `at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)`, totaling 277 μs (2.1%) across 96 instances; this is an elementwise copy kernel. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx forward`)
+small Top Non-GEMM Kernel per Sequence Length
 
-In the backward pass, the first non-GEMM kernel is the same `elementwise_kernel`, totaling 4.342ms (16.6%) across 265 instances. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum --filter-nvtx backward`)
+| Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
+| ------- | ------------------------------------------- | ----- | -------- | ---- |
+| seq128  | void at::native::elementwise_kernel<(int... | 1.9%  | 1.74 ms  | 720  |
+| seq256  | void at::native::elementwise_kernel<(int... | 2.3%  | 2.86 ms  | 720  |
+| seq512  | void at::native::elementwise_kernel<(int... | 4.0%  | 9.28 ms  | 360  |
+| seq1024 | void at::native::elementwise_kernel<(int... | 13.1% | 90.05 ms | 360  |
+
+medium Top Non-GEMM Kernel per Sequence Length
+
+| Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
+| ------- | ------------------------------------------- | ----- | -------- | ---- |
+| seq128  | void at::native::elementwise_kernel<(int... | 2.1%  | 4.24 ms  | 1440 |
+| seq256  | void at::native::elementwise_kernel<(int... | 2.2%  | 7.19 ms  | 1440 |
+| seq512  | void at::native::elementwise_kernel<(int... | 5.3%  | 37.36 ms | 720  |
+| seq1024 | OOM                                         | -     | -        | -    |
+
+large Top Non-GEMM Kernel per Sequence Length
+
+| Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
+| ------- | ------------------------------------------- | ----- | -------- | ---- |
+| seq128  | void at::native::elementwise_kernel<(int... | 1.7%  | 7.41 ms  | 2160 |
+| seq256  | void at::native::elementwise_kernel<(int... | 2.0%  | 14.63 ms | 2160 |
+| seq512  | OOM                                         | -     | -        | -    |
+| seq1024 | OOM                                         | -     | -        | -    |
+
+xl Top Non-GEMM Kernel per Sequence Length
+
+| Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
+| ------- | ------------------------------------------- | ----- | -------- | ---- |
+| seq128  | void at::native::elementwise_kernel<(int... | 1.5%  | 11.42 ms | 2880 |
+| seq256  | OOM                                         | -     | -        | -    |
+| seq512  | OOM                                         | -     | -        | -    |
+| seq1024 | OOM                                         | -     | -        | -    |
+
+2.7B Top Non-GEMM Kernel per Sequence Length
+
+| Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
+| ------- | ------------------------------------------- | ----- | -------- | ---- |
+| seq128  | void at::native::vectorized*elementwise*... | 1.0%  | 11.76 ms | 960  |
+| seq256  | OOM                                         | -     | -        | -    |
+| seq512  | OOM                                         | -     | -        | -    |
+| seq1024 | OOM                                         | -     | -        | -    |
+
+The most time-consuming non-GEMM kernels are element wise copy, as seq length increases, elementwise kernels (activations, copy, etc.) take a larger proportion of time due to more data being processed.
 
 (d) Top kernels by total GPU time
 
-Inference (forward only), top 5. The top 2 (GEMM) account for 83% of total GPU time. (source: `output/nsys/benchmark__forward_only__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum`)
+small GEMM Fraction
 
-| Time  | Total Time | Instances | Avg       | Med       | Min       | Max        | StdDev    | Name                                                                                                                                                                                                                                                                                                                                                               |
-| ----- | ---------- | --------- | --------- | --------- | --------- | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 48.7% | 96.056 ms  | 1800      | 53.364 μs | 39.584 μs | 38.880 μs | 113.343 μs | 27.704 μs | void cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1>(T1::Params)                                                                                                                                                                                                                                                                                     |
-| 34.6% | 68.171 ms  | 720       | 94.682 μs | 94.048 μs | 92.640 μs | 102.400 μs | 1.385 μs  | void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_tn_align1>(T1::Params)                                                                                                                                                                                                                                                                                     |
-| 2.1%  | 4.139 ms   | 1440      | 2.874 μs  | 1.984 μs  | 1.824 μs  | 5.888 μs   | 1.639 μs  | void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3) |
-| 1.8%  | 3.602 ms   | 720       | 5.002 μs  | 4.992 μs  | 4.640 μs  | 5.568 μs   | 108 ns    | void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char \*, (unsigned long)3>>(int, T2, T3)                                                                                                                                                         |
-| 1.5%  | 2.927 ms   | 1470      | 1.991 μs  | 2.048 μs  | 1.760 μs  | 2.624 μs   | 184 ns    | void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)                                                                                          |
+| Seq Len | Inference | Training |
+| ------- | --------- | -------- |
+| seq128  | 88.0%     | 59.3%    |
+| seq256  | 84.6%     | 61.1%    |
+| seq512  | 80.0%     | 53.5%    |
+| seq1024 | 53.7%     | 31.0%    |
 
-Training (forward + backward), top 5. GEMM kernels (rows 1-3 and 5) account for 41% of total GPU time. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_kern_sum`)
+medium GEMM Fraction
 
-| Time  | Total Time | Instances | Avg       | Med       | Min       | Max        | StdDev    | Name                                                                                                                                                                                                                                                                                                                                                               |
-| ----- | ---------- | --------- | --------- | --------- | --------- | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 12.1% | 113.704 ms | 2535      | 44.853 μs | 23.520 μs | 22.880 μs | 180.577 μs | 25.793 μs | void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nt_align1>(T1::Params)                                                                                                                                                                                                                                                                                      |
-| 11.3% | 105.873 ms | 2160      | 49.015 μs | 33.344 μs | 32.448 μs | 87.905 μs  | 22.463 μs | void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)                                                                                                                                                                                                                                                                                      |
-| 10.3% | 96.209 ms  | 1800      | 53.449 μs | 39.808 μs | 38.977 μs | 111.424 μs | 27.381 μs | void cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_tn_align1>(T1::Params)                                                                                                                                                                                                                                                                                     |
-| 7.4%  | 69.243 ms  | 5415      | 12.787 μs | 5.760 μs  | 1.760 μs  | 99.745 μs  | 15.275 μs | void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3) |
-| 7.3%  | 68.356 ms  | 720       | 94.938 μs | 94.624 μs | 91.969 μs | 99.168 μs  | 1.381 μs  | void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_tn_align1>(T1::Params)                                                                                                                                                                                                                                                                                     |
+| Seq Len | Inference | Training |
+| ------- | --------- | -------- |
+| seq128  | 87.0%     | 58.9%    |
+| seq256  | 85.4%     | 63.5%    |
+| seq512  | 77.1%     | 55.1%    |
+| seq1024 | OOM       | OOM      |
 
-Inference (forward only): kernels account for 53.8% of total time. (source: `output/nsys/benchmark__forward_only__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
+large GEMM Fraction
 
-```shell
-85.6% Kernel2 (GEMM)           → matrix multiplication for forward/backward
-5.8%  elementwise_kernel       → activations, copy, etc.
-5.0%  vectorized_elementwise   → vectorized elementwise ops
-```
+| Seq Len | Inference | Training |
+| ------- | --------- | -------- |
+| seq128  | 89.6%     | 59.4%    |
+| seq256  | 87.8%     | 64.7%    |
+| seq512  | OOM       | OOM      |
+| seq1024 | OOM       | OOM      |
 
-Training (forward + backward): kernels account for 85.1% of total time. (source: `output/nsys/benchmark__20260113_105512__medium__FWD_BWD__seq128__warm5.nsys-rep`, `nsys stats --report cuda_gpu_sum`)
+xl GEMM Fraction
 
-```shell
-46.0% Kernel2 (GEMM)           → matrix multiplication for forward/backward
-37.2% multi_tensor_apply       → optimizer parameter updates
-10.2% elementwise_kernel       → activations, copy, etc.
-4.5%  vectorized_elementwise   → vectorized elementwise ops
-```
+| Seq Len | Inference | Training |
+| ------- | --------- | -------- |
+| seq128  | 91.2%     | OOM      |
+| seq256  | OOM       | OOM      |
+| seq512  | OOM       | OOM      |
+| seq1024 | OOM       | OOM      |
 
-- `multi_tensor_apply` relates to `optimizer.step()` and only appears in training.
-- Training is more compute-intensive, so non-kernel time (100% - 85.1%) is smaller than inference (100% - 53.8%).
+2.7B GEMM Fraction
+
+| Seq Len | Inference | Training |
+| ------- | --------- | -------- |
+| seq128  | 94.4%     | OOM      |
+| seq256  | OOM       | OOM      |
+| seq512  | OOM       | OOM      |
+| seq1024 | OOM       | OOM      |
+
+Non-GEMM kernels become more significant as sequence length increases.
+
+Training has a lower GEMM fraction than inference due to additional non-GEMM operations in the backward pass (e.g., elementwise ops for gradients).
+
+As model size increases, GEMM fraction tends to increase because larger models have more compute-intensive matrix multiplications relative to non-GEMM ops.
 
 (e) Attention sub-ranges (NVTX GPU projection)
+Softmax Time (ms)
+Softmax Time (ms)
 
-All ranges use the `PushPop` style.
+| Model  | seq128 | seq256 | seq512 | seq1024 |
+| ------ | ------ | ------ | ------ | ------- |
+| small  | 0.70   | 0.75   | 1.20   | 11.95   |
+| medium | 1.47   | 1.63   | 4.65   | OOM     |
+| large  | 2.23   | 2.42   | OOM    | OOM     |
+| xl     | 3.10   | OOM    | OOM    | OOM     |
+| 2.7B   | 2.01   | OOM    | OOM    | OOM     |
 
-Timing
+Matmul Time (ms)
 
-| Range                         | Total Proj Time | Total Range Time | Instances | Proj Avg   | Proj Med   | Proj Min   | Proj Max   | Proj StdDev |
-| ----------------------------- | --------------- | ---------------- | --------- | ---------- | ---------- | ---------- | ---------- | ----------- |
-| :forward                      | 1.043 s         | 1.054 s          | 1         | 1.043 s    | 1.043 s    | 1.043 s    | 1.043 s    | 0 ns        |
-| :scaled dot product attention | 82.794 ms       | 101.292 ms       | 24        | 3.450 ms   | 546.130 μs | 486.082 μs | 69.771 ms  | 14.127 ms   |
-| :computing attention scores   | 22.329 ms       | 40.620 ms        | 24        | 930.365 μs | 273.105 μs | 120.448 μs | 16.722 ms  | 3.365 ms    |
-| :computing softmax            | 17.560 ms       | 32.895 ms        | 24        | 731.664 μs | 74.032 μs  | 63.649 μs  | 14.344 ms  | 2.901 ms    |
-| :final matmul                 | 1.079 ms        | 2.552 ms         | 24        | 44.957 μs  | 38.272 μs  | 31.872 μs  | 210.977 μs | 35.465 μs   |
+| Model  | seq128 | seq256 | seq512 | seq1024 |
+| ------ | ------ | ------ | ------ | ------- |
+| small  | 1.53   | 1.41   | 2.40   | 8.69    |
+| medium | 3.07   | 3.20   | 6.30   | OOM     |
+| large  | 3.60   | 4.75   | OOM    | OOM     |
+| xl     | 5.81   | OOM    | OOM    | OOM     |
+| 2.7B   | 3.67   | OOM    | OOM    | OOM     |
 
-Ops
+Softmax/Matmul Ratio
 
-| Range                         | Total GPU Ops | Avg GPU Ops | Avg Range Lvl | Avg Num Child |
-| ----------------------------- | ------------- | ----------- | ------------- | ------------- |
-| :forward                      | 1184          | 1184        | 0             | 24            |
-| :scaled dot product attention | 360           | 15          | 1             | 3             |
-| :computing attention scores   | 144           | 6           | 2             | 0             |
-| :computing softmax            | 120           | 5           | 2             | 0             |
-| :final matmul                 | 48            | 2           | 2             | 0             |
+| Model  | seq128 | seq256 | seq512 | seq1024 |
+| ------ | ------ | ------ | ------ | ------- |
+| small  | 45.9%  | 52.9%  | 49.8%  | 137.6%  |
+| medium | 48.0%  | 50.9%  | 73.9%  | OOM     |
+| large  | 62.0%  | 50.9%  | OOM    | OOM     |
+| xl     | 53.3%  | OOM    | OOM    | OOM     |
+| 2.7B   | 55.0%  | OOM    | OOM    | OOM     |
 
-(source: `output/nsys/benchmark__fix_annotation__medium__FWD__seq128__warm5.nsys-rep`, `nsys stats --report nvtx_gpu_proj_sum --filter-nvtx forward`)
-
-In a single forward pass, softmax time is 17.56ms vs matrix multiplications at (22.329ms + 1.079ms) = 23.408ms, so softmax is about 75% of matmul time.
-
-> In really `cs336_basics.AdamW` and `cs336_basics.CrossEntropyLoss`, the time is 1.397 ms vs (2.335 ms + 650.908 μs) = 2.985 ms, so softmax is about 46.8% of matmul time. (source `output/nsys/benchmark__self_adamw_entropy__medium__FWD__seq128__warm5.nsys-rep`)
+Bigger seq length, softmax time increases faster than matmul time, leading to a higher softmax/matmul ratio. This is because softmax involves more elementwise operations and reductions that scale quadratically with sequence length, while matmul benefits from optimized GPU kernels.
 
 For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%.
-
-The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
 ```shell
 m x (n-1)  get row max
@@ -143,6 +240,8 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
+
+The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
 ### mixed_precision_accumulation
 
@@ -262,4 +361,8 @@ Top 5 kernels in BF16 autocast F+B (medium model):
    larger models benefit more from reduced precision matmul
 3. As model size increases, BF16 disadvantage decreases
    because compute time dominates conversion overhead
+```
+
+```
+
 ```

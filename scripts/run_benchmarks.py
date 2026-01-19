@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from itertools import product
 from pathlib import Path
 from time import strftime
 
@@ -18,7 +17,6 @@ from cs336_systems.configs import CONFIGS, ModelConfig
 from cs336_systems.output_utils import get_output_dir
 
 SEQ_LENGTHS = (128, 256, 512, 1024)
-WARMUP_STEPS = (0, 1, 5)
 CONFIG_ORDER = [config.name for config in CONFIGS]
 MODE_LABELS = {True: "forward-only", False: "forward+backward"}
 MODE_ORDER = ("forward-only", "forward+backward")
@@ -62,7 +60,7 @@ class RunOptions:
     run_tag: str | None
     output_dir: Path
     autocast: bool
-    forward_only: bool = True
+    warmup_steps: int
 
 
 def _extract_float(pattern: str, text: str) -> float | None:
@@ -113,12 +111,6 @@ def _benchmark_cmd(
     return cmd
 
 
-def _maybe_enable_nvtx_attention(cmd: list[str], *, enable: bool) -> list[str]:
-    if enable:
-        return [*cmd, "--nvtx-attn"]
-    return cmd
-
-
 def _nsys_cmd(report_prefix: Path, delay: float) -> list[str]:
     cmd = [
         "nsys",
@@ -130,7 +122,7 @@ def _nsys_cmd(report_prefix: Path, delay: float) -> list[str]:
         "--sample=cpu",
     ]
     if delay > 0:
-        cmd.insert(6, f"--delay={delay}")
+        cmd.append(f"--delay={delay}")
     return cmd
 
 
@@ -205,7 +197,7 @@ def _build_nsys_report_prefix(
     context_length: int,
     warmup_steps: int,
 ) -> Path:
-    mode_label = MODE_FILE_LABELS[MODE_LABELS[forward_only]]
+    mode_label = "FWD" if forward_only else "FWD_BWD"
     parts = [
         options.nsys_prefix,
         options.run_tag,
@@ -234,9 +226,8 @@ def run_benchmark(
         warmup_steps=warmup_steps,
         autocast=options.autocast,
     )
-    cmd = _maybe_enable_nvtx_attention(cmd, enable=options.nsys)
-
     if options.nsys:
+        cmd.append("--nvtx-attn")
         report_prefix = _build_nsys_report_prefix(
             options,
             config,
@@ -246,48 +237,15 @@ def run_benchmark(
         )
         cmd = [*_nsys_cmd(report_prefix, options.nsys_delay), *cmd]
 
-    print(
-        "Running benchmark for "
-        f"{config.name} ({MODE_LABELS[forward_only]}, "
-        f"seq={context_length}, warmup={warmup_steps})..."
-    )
+    mode = MODE_LABELS[forward_only]
+    label = f"{config.name} ({mode}, seq={context_length}, warmup={warmup_steps})"
+    print(f"Running benchmark for {label}...")
+
     # S603: cmd is constructed internally from hardcoded configs, not from user input
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)  # noqa: S603
-    output = result.stdout
-
-    row = _base_row(
-        config,
-        forward_only=forward_only,
-        context_length=context_length,
-        warmup_steps=warmup_steps,
-    )
-    row.update({"Result": "OK", **_parse_metrics(output)})
-    return row
-
-
-def _run_case(
-    config: ModelConfig,
-    *,
-    forward_only: bool,
-    context_length: int,
-    warmup_steps: int,
-    options: RunOptions,
-) -> dict:
-    """Run a single benchmark case with error handling."""
     try:
-        return run_benchmark(
-            config,
-            forward_only=forward_only,
-            context_length=context_length,
-            warmup_steps=warmup_steps,
-            options=options,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)  # noqa: S603
     except subprocess.CalledProcessError as e:
-        print(
-            "Error running benchmark for "
-            f"{config.name} ({MODE_LABELS[forward_only]}, "
-            f"seq={context_length}, warmup={warmup_steps}): {e}"
-        )
+        print(f"Error running benchmark for {label}: {e}")
         print(f"stdout: {e.stdout}")
         print(f"stderr: {e.stderr}")
         return _error_row(
@@ -297,6 +255,15 @@ def _run_case(
             warmup_steps=warmup_steps,
             error=e,
         )
+
+    row = _base_row(
+        config,
+        forward_only=forward_only,
+        context_length=context_length,
+        warmup_steps=warmup_steps,
+    )
+    row.update({"Result": "OK", **_parse_metrics(result.stdout)})
+    return row
 
 
 def _format_results(df: pd.DataFrame) -> pd.DataFrame:
@@ -321,13 +288,7 @@ def _format_results(df: pd.DataFrame) -> pd.DataFrame:
         for metric, mode in df.columns
     ]
     df = df.reset_index()
-
-    sort_cols = [
-        "Config",
-        "Seq Len",
-        "Warmup Steps",
-    ]
-    return df.sort_values(sort_cols, kind="stable", ignore_index=True)
+    return df.sort_values(INDEX_COLS, kind="stable", ignore_index=True)
 
 
 def _parse_args() -> RunOptions:
@@ -369,16 +330,14 @@ def _parse_args() -> RunOptions:
         help="Enable autocasting for CUDA.",
     )
     parser.add_argument(
-        "--forward-only",
-        action="store_true",
-        help="Run only forward pass benchmarks.",
+        "--warmup-steps",
+        type=int,
+        default=5,
+        help="Number of warm-up steps (default: 5).",
     )
     args = parser.parse_args()
 
-    run_tag = args.run_tag
-    if run_tag is None and args.nsys:
-        run_tag = strftime("%Y%m%d_%H%M%S")
-
+    run_tag = args.run_tag or (strftime("%Y%m%d_%H%M%S") if args.nsys else None)
     output_dir = get_output_dir()
     nsys_dir = args.nsys_output_dir or (output_dir / "nsys")
     nsys_dir.mkdir(parents=True, exist_ok=True)
@@ -391,7 +350,7 @@ def _parse_args() -> RunOptions:
         run_tag=run_tag,
         output_dir=output_dir,
         autocast=args.autocast,
-        forward_only=args.forward_only,
+        warmup_steps=args.warmup_steps,
     )
 
 
@@ -402,36 +361,20 @@ def main() -> None:
         msg = "nsys not found on PATH. Install Nsight Systems or disable --nsys."
         raise RuntimeError(msg)
 
-    results = []
-    # nsys mode: single config (first seq, last warmup); otherwise full grid
-    if options.nsys:
-        forward_options = (True,) if options.forward_only else (True, False)
-        content_options = (SEQ_LENGTHS[0],)
-        warmup_options = (WARMUP_STEPS[-1],)
-    else:
-        forward_options = (True,)
-        content_options = SEQ_LENGTHS
-        warmup_options = WARMUP_STEPS
-    for config in CONFIGS:
-        for forward_only, context_length, warmup_steps in product(
-            forward_options, content_options, warmup_options
-        ):
-            results.append(
-                _run_case(
-                    config,
-                    forward_only=forward_only,
-                    context_length=context_length,
-                    warmup_steps=warmup_steps,
-                    options=options,
-                )
-            )
+    results = [
+        run_benchmark(
+            config,
+            forward_only=forward_only,
+            context_length=context_length,
+            warmup_steps=options.warmup_steps,
+            options=options,
+        )
+        for config in CONFIGS
+        for context_length in SEQ_LENGTHS
+        for forward_only in [True, False]
+    ]
 
     df = _format_results(pd.DataFrame(results))
-
-    print("\n" + "=" * 80)
-    print("BENCHMARK RESULTS")
-    print("=" * 80 + "\n")
-    print(df.to_markdown(index=False))
 
     tag_suffix = f"__{_slugify(options.run_tag)}" if options.run_tag else ""
     output_file = options.output_dir / f"benchmark_results{tag_suffix}.md"
