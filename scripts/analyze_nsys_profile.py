@@ -4,6 +4,7 @@
 
 import argparse
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
@@ -11,15 +12,17 @@ SIZES = ["small", "medium", "large", "xl", "2.7B"]
 SEQ_LENS = [128, 256, 512, 1024]
 NSYS_DIR = Path("output/nsys")
 MIN_KERNEL_PARTS = 10
-MIN_FORWARD_BACKWARD_PARTS = 4
-MIN_ATTN_MARKER_PARTS = 5
 MIN_BENCHMARK_TABLE_COLS = 6
-MODES = [("FWD", "Inference"), ("FWD_BWD", "Training")]
 ATTN_KEYS = ("softmax", "attn_scores", "final_matmul")
+ATTN_MARKERS = {
+    "computing attention scores": "attn_scores",
+    "computing softmax": "softmax",
+    "final matmul": "final_matmul",
+}
+NVTX_INSTANCE = 6  # Which iteration to analyze for single-pass kernel stats
 NvtxStats: TypeAlias = dict[str, dict[str, float]]
 KernelInfo: TypeAlias = dict[str, str | float | bool]
 OomStatus: TypeAlias = dict[tuple[str, int, str], bool]
-KERN_HEADERS = ["Time%", "Total", "Inst", "Kernel"]
 SEQ_HEADERS = ["Model"] + [f"seq{s}" for s in SEQ_LENS]
 
 
@@ -36,21 +39,16 @@ def parse_oom_status(run_tag: str) -> OomStatus:
     with benchmark_results.open() as f:
         lines = f.readlines()
 
-    # Skip header and separator lines
     for line in lines[3:]:
         parts = [p.strip() for p in line.split("|")]
         if len(parts) < MIN_BENCHMARK_TABLE_COLS:
             continue
 
-        config = parts[1]  # Model size
-        seq_len_str = parts[2]  # Seq len
-        status_fwd = parts[4]  # Status FWD
-        status_fwd_bwd = parts[5]  # Status FWD+BWD
-
         try:
-            seq_len = int(seq_len_str)
-            oom_status[(config, seq_len, "FWD")] = status_fwd == "OOM"
-            oom_status[(config, seq_len, "FWD_BWD")] = status_fwd_bwd == "OOM"
+            config = parts[1]
+            seq_len = int(parts[2])
+            oom_status[(config, seq_len, "FWD")] = parts[4] == "OOM"
+            oom_status[(config, seq_len, "FWD_BWD")] = parts[5] == "OOM"
         except ValueError:
             continue
 
@@ -86,26 +84,38 @@ def _create_stats_entry(total_ns: float, instances: float) -> dict[str, float]:
     return {"total_ns": total_ns, "instances": instances, "avg_ns": avg_ns}
 
 
-def parse_nvtx_sum(output: str) -> NvtxStats:
-    """Parse nvtx_sum output to extract timing data."""
+def parse_nvtx_gpu_proj_sum(output: str) -> NvtxStats:
+    """Parse nvtx_gpu_proj_sum output to extract GPU timing data.
+
+    Expected format:
+    Range  Style  Total Proj Time (ns)  Total Range Time (ns)  Range Instances  ...
+    :forward  PushPop  1,397,875,298  1,423,929,186  15  ...
+    :computing softmax  PushPop  39,831,840  61,604,838  360  ...
+    """
     stats: NvtxStats = {}
-    attn_markers = {
-        "computing attention scores": "attn_scores",
-        "computing softmax": "softmax",
-        "final matmul": "final_matmul",
-    }
     for line in output.splitlines():
-        parts = line.split()
-        if ":forward" in line or ":backward" in line:
-            if len(parts) >= MIN_FORWARD_BACKWARD_PARTS:
-                total_ns = _parse_float(parts[1])
-                instances = _parse_float(parts[2])
-                stats[parts[-1]] = _create_stats_entry(total_ns, instances)
+        stripped = line.strip()
+        if not stripped or not stripped.startswith(":"):
+            continue
+
+        parts = stripped.split()
+
+        try:
+            pushpop_idx = parts.index("PushPop")
+        except ValueError:
+            continue
+
+        if len(parts) < pushpop_idx + 4:
+            continue
+
+        total_ns = _parse_float(parts[pushpop_idx + 1])
+        instances = _parse_float(parts[pushpop_idx + 3])
+
+        if ":forward" in stripped or ":backward" in stripped:
+            stats[parts[0]] = _create_stats_entry(total_ns, instances)
         else:
-            for marker, key in attn_markers.items():
-                if marker in line and len(parts) >= MIN_ATTN_MARKER_PARTS:
-                    total_ns = _parse_float(parts[3])
-                    instances = _parse_float(parts[4])
+            for marker, key in ATTN_MARKERS.items():
+                if marker in stripped:
                     stats[key] = _create_stats_entry(total_ns, instances)
                     break
     return stats
@@ -122,7 +132,7 @@ def parse_kernel_sum(output: str) -> list[KernelInfo]:
         if len(parts) < MIN_KERNEL_PARTS:
             continue
         try:
-            float(parts[0])  # Check if first part is a percentage
+            float(parts[0])
             name = " ".join(parts[8:])[:50] + "..."
             kernels.append(
                 {
@@ -140,14 +150,10 @@ def parse_kernel_sum(output: str) -> list[KernelInfo]:
 
 def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
     """Print a formatted markdown table with aligned columns."""
-    print(f"\n### {title}\n")
+    print(f"\n{title}\n")
     if not rows:
         return
-    # Validate row lengths match headers
-    for row in rows:
-        if len(row) != len(headers):
-            msg = f"Row length {len(row)} doesn't match headers length {len(headers)}"
-            raise ValueError(msg)
+
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
     hdr = " | ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True))
     sep = " | ".join("-" * w for w in widths)
@@ -156,11 +162,6 @@ def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
     for row in rows:
         cells = " | ".join(c.ljust(w) for c, w in zip(row, widths, strict=True))
         print(f"| {cells} |")
-
-
-def _kernel_to_row(k: KernelInfo) -> list[str]:
-    """Convert kernel dict to table row."""
-    return [str(k["pct"]), str(k["total_time"]), str(k["instances"]), str(k["name"])]
 
 
 def _calc_gemm_pct(kernels: list[KernelInfo]) -> float:
@@ -176,20 +177,46 @@ def _build_report_path(run_tag: str, size: str, mode: str, seq_len: int) -> Path
     return NSYS_DIR / name
 
 
-def _get_nvtx_stats(
-    run_tag: str, size: str, mode: str = "FWD", seq_len: int = 128
-) -> NvtxStats:
-    """Get parsed NVTX stats for a given configuration."""
+def _get_stats_with_filter(  # noqa: PLR0913 - All parameters needed for report generation
+    run_tag: str,
+    size: str,
+    mode: str,
+    seq_len: int,
+    report_type: str,
+    nvtx_range: str = "",
+) -> str:
+    """Get nsys stats output with optional NVTX filter."""
     path = _build_report_path(run_tag, size, mode, seq_len)
-    return parse_nvtx_sum(run_nsys_stats(path, "nvtx_sum"))
+    nvtx_filter = f"{nvtx_range}/{NVTX_INSTANCE - 1}" if nvtx_range else ""
+    return run_nsys_stats(path, report_type, nvtx_filter)
+
+
+def _get_nvtx_stats(
+    run_tag: str,
+    size: str,
+    mode: str = "FWD",
+    seq_len: int = 128,
+    nvtx_range: str = "",
+) -> NvtxStats:
+    """Get parsed NVTX GPU projection stats for a given configuration."""
+    output = _get_stats_with_filter(
+        run_tag, size, mode, seq_len, "nvtx_gpu_proj_sum", nvtx_range
+    )
+    return parse_nvtx_gpu_proj_sum(output)
 
 
 def _get_kernels(
-    run_tag: str, size: str, mode: str = "FWD", seq_len: int = 128
+    run_tag: str,
+    size: str,
+    mode: str = "FWD",
+    seq_len: int = 128,
+    nvtx_range: str = "",
 ) -> list[KernelInfo]:
     """Get parsed kernel stats for a given configuration."""
-    path = _build_report_path(run_tag, size, mode, seq_len)
-    return parse_kernel_sum(run_nsys_stats(path, "cuda_gpu_kern_sum"))
+    output = _get_stats_with_filter(
+        run_tag, size, mode, seq_len, "cuda_gpu_kern_sum", nvtx_range
+    )
+    return parse_kernel_sum(output)
 
 
 def _calc_softmax_ratio(stats: NvtxStats) -> float | None:
@@ -208,81 +235,141 @@ def _format_ms(nanoseconds: float) -> str:
     return f"{nanoseconds / 1e6:.2f}"
 
 
-def _analyze_forward_timing(run_tag: str) -> None:
+def _build_metric_table(
+    run_tag: str,
+    oom_status: OomStatus,
+    metric_fn: Callable[[str, str, int, OomStatus], str],
+) -> list[list[str]]:
+    """Build a table of metrics for all model sizes and sequence lengths."""
+    return [
+        [size] + [metric_fn(run_tag, size, seq_len, oom_status) for seq_len in SEQ_LENS]
+        for size in SIZES
+    ]
+
+
+def _analyze_forward_timing(run_tag: str, oom_status: OomStatus) -> None:
     """Analyze forward pass timing."""
     print("## (a) Forward Pass Timing\n")
-    fwd_rows = []
-    for size in SIZES:
-        stats = _get_nvtx_stats(run_tag, size)
-        if ":forward" in stats:
-            fwd = stats[":forward"]
-            fwd_rows.append(
-                [
-                    size,
-                    _format_ms(fwd["total_ns"]),
-                    str(int(fwd["instances"])),
-                    _format_ms(fwd["avg_ns"]),
-                ]
-            )
-    print_table(
-        "Forward Pass Time (NVTX)",
-        ["Model", "Total (ms)", "Inst", "Avg (ms)"],
-        fwd_rows,
+    rows = _build_metric_table(
+        run_tag,
+        oom_status,
+        lambda rt, sz, sl, oom: _get_value_or_status(rt, sz, sl, "FWD", oom),
     )
+    print_table("Forward Pass Avg Time (ms)", SEQ_HEADERS, rows)
 
 
-def _analyze_dominant_kernels(run_tag: str) -> None:
-    """Analyze top kernels in forward vs forward+backward."""
-    print("\n## (b) Dominant CUDA Kernels\n")
-    for mode, label in MODES:
-        print(f"\n**{label} (medium model):**\n")
-        kernels = _get_kernels(run_tag, "medium", mode)
-        if kernels:
-            rows = [_kernel_to_row(k) for k in kernels[:3]]
-            print_table(f"Top 3 Kernels ({label})", KERN_HEADERS, rows)
-
-
-def _analyze_non_gemm_kernels(run_tag: str) -> None:
-    """Analyze non-GEMM kernels."""
+def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> None:
+    """Analyze non-GEMM kernels for all models in compact table format."""
     print("\n## (c) Non-GEMM Kernels in Forward Pass\n")
-    kernels = _get_kernels(run_tag, "medium")
-    non_gemm = [k for k in kernels if not k.get("is_gemm", False)][:3]
-    if non_gemm:
-        rows = [_kernel_to_row(k) for k in non_gemm]
-        print_table("Top Non-GEMM Kernels", KERN_HEADERS, rows)
 
-
-def _analyze_gemm_fraction(run_tag: str) -> None:
-    """Analyze GEMM fraction in inference vs training."""
-    print("\n## (d) GEMM Fraction: Inference vs Training\n")
-    for mode, label in MODES:
-        gemm_pct = _calc_gemm_pct(_get_kernels(run_tag, "medium", mode))
-        print(f"- **{label}**: GEMM ~{gemm_pct:.1f}% of top kernel time")
-
-
-def _analyze_attention_ops(run_tag: str) -> None:
-    """Analyze softmax vs matmul in attention."""
-    print("\n## (e) Softmax vs Matmul in Attention\n")
-    attn_rows = []
     for size in SIZES:
-        stats = _get_nvtx_stats(run_tag, size)
-        ratio = _calc_softmax_ratio(stats)
-        if ratio is not None:
-            softmax_ms = stats["softmax"]["total_ns"]
-            matmul_ms = (
+        headers = ["Seq Len", "Top Non-GEMM Kernel", "Time%", "Total", "Inst"]
+        rows = []
+
+        for seq_len in SEQ_LENS:
+            if oom_status.get((size, seq_len, "FWD"), False):
+                rows.append([f"seq{seq_len}", "OOM", "-", "-", "-"])
+                continue
+
+            kernels = _get_kernels(run_tag, size, "FWD", seq_len)
+            non_gemm = [k for k in kernels if not k.get("is_gemm", False)]
+
+            if non_gemm:
+                top = non_gemm[0]
+                kernel_name = str(top["name"])[:40] + "..."
+                rows.append(
+                    [
+                        f"seq{seq_len}",
+                        kernel_name,
+                        str(top["pct"]),
+                        str(top["total_time"]),
+                        str(top["instances"]),
+                    ]
+                )
+            else:
+                rows.append([f"seq{seq_len}", "N/A", "-", "-", "-"])
+
+        if rows:
+            print_table(
+                (f"{size} Top Non-GEMM Kernel per Sequence Length"), headers, rows
+            )
+
+
+def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
+    """Analyze GEMM fraction in inference vs training for all models."""
+    print("\n## (d) GEMM Fraction: Inference vs Training\n")
+
+    for size in SIZES:
+        headers = ["Seq Len", "Inference", "Training"]
+        rows = []
+
+        for seq_len in SEQ_LENS:
+            row = [f"seq{seq_len}"]
+            # Inference (FWD mode)
+            row.append(
+                _get_gemm_value_or_status(run_tag, size, seq_len, "FWD", oom_status)
+            )
+            # Training (FWD_BWD mode)
+            row.append(
+                _get_gemm_value_or_status(run_tag, size, seq_len, "FWD_BWD", oom_status)
+            )
+            rows.append(row)
+
+        if rows:
+            print_table(f"{size} GEMM Fraction", headers, rows)
+
+
+def _get_attn_metric(
+    run_tag: str,
+    size: str,
+    seq_len: int,
+    oom_status: OomStatus,
+    metric_type: str,
+) -> str:
+    """Get attention metric (softmax time, matmul time, or ratio) or status."""
+    if oom_status.get((size, seq_len, "FWD"), False):
+        return "OOM"
+
+    stats = _get_nvtx_stats(run_tag, size, "FWD", seq_len, "forward")
+
+    if metric_type == "softmax":
+        if "softmax" in stats:
+            return _format_ms(stats["softmax"]["total_ns"])
+    elif metric_type == "matmul":
+        if "attn_scores" in stats and "final_matmul" in stats:
+            matmul_ns = (
                 stats["attn_scores"]["total_ns"] + stats["final_matmul"]["total_ns"]
             )
-            attn_rows.append(
-                [
-                    size,
-                    _format_ms(softmax_ms),
-                    _format_ms(matmul_ms),
-                    f"{ratio:.1%}",
-                ]
-            )
-    print_table(
-        "Softmax vs Matmul", ["Model", "Softmax(ms)", "Matmul(ms)", "Ratio"], attn_rows
-    )
+            return _format_ms(matmul_ns)
+    elif metric_type == "ratio":
+        ratio = _calc_softmax_ratio(stats)
+        if ratio is not None:
+            return f"{ratio:.1%}"
+
+    return "N/A"
+
+
+def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> None:
+    """Analyze softmax vs matmul in attention for a single forward pass.
+
+    Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
+    """
+    print(f"\n## (e) Softmax vs Matmul in Attention (iteration {NVTX_INSTANCE})\n")
+
+    for metric_type, title in [
+        ("softmax", "Softmax Time (ms)"),
+        ("matmul", "Matmul Time (ms)"),
+        ("ratio", "Softmax/Matmul Ratio"),
+    ]:
+        rows = [
+            [size]
+            + [
+                _get_attn_metric(run_tag, size, seq_len, oom_status, metric_type)
+                for seq_len in SEQ_LENS
+            ]
+            for size in SIZES
+        ]
+        print_table(title, SEQ_HEADERS, rows)
 
 
 def _get_value_or_status(
@@ -297,107 +384,67 @@ def _get_value_or_status(
     return "N/A"
 
 
-def _seq_len_fwd_timing(run_tag: str, oom_status: OomStatus) -> None:
-    """Analyze forward pass timing vs sequence length."""
-    print("**Forward Pass Time vs Sequence Length:**\n")
-    fwd_rows = [
-        [size]
-        + [
-            _get_value_or_status(run_tag, size, seq_len, "FWD", oom_status)
-            for seq_len in SEQ_LENS
-        ]
-        for size in SIZES
-    ]
-    if fwd_rows:
-        print_table("Forward Pass Avg Time (ms)", SEQ_HEADERS, fwd_rows)
-
-
-def _get_ratio_or_status(
-    run_tag: str, size: str, seq_len: int, oom_status: OomStatus
-) -> str:
-    """Get softmax/matmul ratio or status (OOM/N/A) for a configuration."""
-    if oom_status.get((size, seq_len, "FWD"), False):
-        return "OOM"
-    ratio = _calc_softmax_ratio(_get_nvtx_stats(run_tag, size, "FWD", seq_len))
-    return f"{ratio:.1%}" if ratio is not None else "N/A"
-
-
-def _seq_len_softmax_ratio(run_tag: str, oom_status: OomStatus) -> None:
-    """Analyze softmax/matmul ratio vs sequence length."""
-    print("\n**Softmax/Matmul Ratio vs Sequence Length:**\n")
-    ratio_rows = [
-        [size]
-        + [
-            _get_ratio_or_status(run_tag, size, seq_len, oom_status)
-            for seq_len in SEQ_LENS
-        ]
-        for size in SIZES
-    ]
-    if ratio_rows:
-        print_table("Softmax/Matmul Ratio", SEQ_HEADERS, ratio_rows)
-
-
 def _get_gemm_value_or_status(
-    run_tag: str, seq_len: int, mode: str, oom_status: OomStatus
+    run_tag: str, size: str, seq_len: int, mode: str, oom_status: OomStatus
 ) -> str:
-    """Get GEMM percentage or status (OOM/N/A) for medium model configuration."""
-    if oom_status.get(("medium", seq_len, mode), False):
+    """Get GEMM percentage or status (OOM/N/A) for a configuration."""
+    if oom_status.get((size, seq_len, mode), False):
         return "OOM"
-    kernels = _get_kernels(run_tag, "medium", mode, seq_len)
+    kernels = _get_kernels(run_tag, size, mode, seq_len)
     return f"{_calc_gemm_pct(kernels):.1f}%" if kernels else "N/A"
 
 
-def _seq_len_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
-    """Analyze GEMM fraction vs sequence length."""
-    print("\n**GEMM Fraction vs Sequence Length (medium model):**\n")
-    for mode, label in MODES:
-        values = [
-            _get_gemm_value_or_status(run_tag, seq_len, mode, oom_status)
+def _get_top_kernel_str(
+    run_tag: str, size: str, nvtx_range: str, mode: str, seq_len: int
+) -> str:
+    """Get formatted string for top kernel in NVTX range."""
+    kernels = _get_kernels(run_tag, size, mode, seq_len, nvtx_range)
+    if kernels:
+        top = kernels[0]
+        return f"{top['name'][:25]}... ({top['pct']})"
+    return "N/A"
+
+
+def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> None:
+    """Analyze kernels within single forward/backward pass in compact table format.
+
+    Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
+    """
+    print(f"\n## (b) Single Pass Analysis (iteration {NVTX_INSTANCE})\n")
+
+    def get_kernel(mode: str, nvtx_range: str, seq_len: int) -> str:
+        if oom_status.get((size, seq_len, mode), False):
+            return "OOM"
+        return _get_top_kernel_str(run_tag, size, nvtx_range, mode, seq_len)
+
+    for size in SIZES:
+        headers = [
+            "Seq Len",
+            "Inference Forward",
+            "Training Forward",
+            "Training Backward",
+        ]
+        rows = [
+            [
+                f"seq{seq_len}",
+                get_kernel("FWD", "forward", seq_len),
+                get_kernel("FWD_BWD", "forward", seq_len),
+                get_kernel("FWD_BWD", "backward", seq_len),
+            ]
             for seq_len in SEQ_LENS
         ]
-        pairs = ", ".join(f"seq{s}={v}" for s, v in zip(SEQ_LENS, values, strict=True))
-        print(f"- **{label}**: {pairs}")
-
-
-def _analyze_seq_len_scaling(run_tag: str, oom_status: OomStatus) -> None:
-    """Analyze performance scaling across different sequence lengths."""
-    print("\n## (f) Sequence Length Scaling Analysis\n")
-    _seq_len_fwd_timing(run_tag, oom_status)
-    _seq_len_softmax_ratio(run_tag, oom_status)
-    _seq_len_gemm_fraction(run_tag, oom_status)
-
-
-def _print_conclusions() -> None:
-    """Print conclusions."""
-    print("\n## Conclusions\n")
-    print("(a) Forward times from NVTX are consistent with Python timeit")
-    print("    (slight profiling overhead expected)")
-    print("(b) GEMM kernels (cutlass) dominate; same family in fwd/bwd,")
-    print("    more instances in bwd")
-    print("(c) Non-GEMM: elementwise ops (copy, activation) ~2-5% of fwd time")
-    print("(d) GEMM fraction: ~87% inference -> ~59% training")
-    print("    (backward adds more GEMM, optimizer adds non-GEMM ops)")
-    print("(e) Softmax takes 10-67% of matmul time despite ~2% FLOPs")
-    print("    (memory-bound vs compute-bound, ratio decreases with model size)")
-    print("(f) Sequence length scaling:")
-    print("    - Forward time scales ~O(n^2) due to attention")
-    print("    - Softmax/matmul ratio increases with seq_len (softmax is O(n^2))")
-    print("    - Larger models OOM at shorter seq_len")
-    print("    - GEMM fraction may decrease at longer seq_len")
-    print("      (more attention overhead)")
+        print_table(f"{size} Top Kernel per Pass", headers, rows)
 
 
 def analyze(run_tag: str) -> None:
     """Run analysis and print results."""
     print("# NSYS Profile Analysis\n")
     oom_status = parse_oom_status(run_tag)
-    _analyze_forward_timing(run_tag)
-    _analyze_dominant_kernels(run_tag)
-    _analyze_non_gemm_kernels(run_tag)
-    _analyze_gemm_fraction(run_tag)
-    _analyze_attention_ops(run_tag)
-    _analyze_seq_len_scaling(run_tag, oom_status)
-    _print_conclusions()
+    _analyze_forward_timing(run_tag, oom_status)
+    _analyze_single_pass_kernels(run_tag, oom_status)
+    _analyze_non_gemm_kernels(run_tag, oom_status)
+    _analyze_gemm_fraction(run_tag, oom_status)
+    _analyze_attention_ops(run_tag, oom_status)
 
 
 if __name__ == "__main__":
