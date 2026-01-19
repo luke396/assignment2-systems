@@ -122,7 +122,7 @@ def _nsys_cmd(report_prefix: Path, delay: float) -> list[str]:
         "--sample=cpu",
     ]
     if delay > 0:
-        cmd.insert(6, f"--delay={delay}")
+        cmd.append(f"--delay={delay}")
     return cmd
 
 
@@ -197,7 +197,7 @@ def _build_nsys_report_prefix(
     context_length: int,
     warmup_steps: int,
 ) -> Path:
-    mode_label = MODE_FILE_LABELS[MODE_LABELS[forward_only]]
+    mode_label = "FWD" if forward_only else "FWD_BWD"
     parts = [
         options.nsys_prefix,
         options.run_tag,
@@ -337,10 +337,7 @@ def _parse_args() -> RunOptions:
     )
     args = parser.parse_args()
 
-    run_tag = args.run_tag
-    if run_tag is None and args.nsys:
-        run_tag = strftime("%Y%m%d_%H%M%S")
-
+    run_tag = args.run_tag or (strftime("%Y%m%d_%H%M%S") if args.nsys else None)
     output_dir = get_output_dir()
     nsys_dir = args.nsys_output_dir or (output_dir / "nsys")
     nsys_dir.mkdir(parents=True, exist_ok=True)
@@ -367,13 +364,14 @@ def main() -> None:
     results = [
         run_benchmark(
             config,
-            forward_only=False,
+            forward_only=forward_only,
             context_length=context_length,
             warmup_steps=options.warmup_steps,
             options=options,
         )
         for config in CONFIGS
         for context_length in SEQ_LENGTHS
+        for forward_only in [True, False]
     ]
 
     df = _format_results(pd.DataFrame(results))
