@@ -241,9 +241,8 @@ def run_benchmark(
     label = f"{config.name} ({mode}, seq={context_length}, warmup={warmup_steps})"
     print(f"Running benchmark for {label}...")
 
-    # S603: cmd is constructed internally from hardcoded configs, not from user input
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)  # noqa: S603
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error running benchmark for {label}: {e}")
         print(f"stdout: {e.stdout}")
@@ -377,9 +376,11 @@ def main() -> None:
     df = _format_results(pd.DataFrame(results))
 
     tag_suffix = f"__{_slugify(options.run_tag)}" if options.run_tag else ""
+
+    # Save Markdown table
     output_file = options.output_dir / f"benchmark_results{tag_suffix}.md"
-    output_file.write_text(f"# Benchmark Results\n\n{df.to_markdown(index=False)}\n")
-    print(f"\nResults saved to {output_file}")
+    output_file.write_text(f"### Benchmark Results\n\n{df.to_markdown(index=False)}\n")
+    print(f"Markdown table saved to {output_file}")
 
 
 if __name__ == "__main__":

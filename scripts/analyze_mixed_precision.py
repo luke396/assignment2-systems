@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Analyze mixed precision benchmark results from nsys reports."""
-# ruff: noqa: S603, S607
 
+import argparse
 import subprocess
 from pathlib import Path
+from textwrap import dedent
 
-SIZES = ["small", "medium", "large", "xl", "2.7B"]
-NSYS_DIR = Path("output/nsys")
+from scripts.constants import NSYS_DIR, SIZES
+from scripts.table_utils import format_table
 
 
 def get_nvtx_stats(report_path: Path) -> dict[str, float]:
@@ -32,15 +33,6 @@ def get_nvtx_stats(report_path: Path) -> dict[str, float]:
     return stats
 
 
-def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
-    """Print a formatted markdown table."""
-    print(f"\n## {title}\n")
-    print("| " + " | ".join(headers) + " |")
-    print("| " + " | ".join(["---"] * len(headers)) + " |")
-    for row in rows:
-        print("| " + " | ".join(row) + " |")
-
-
 def _build_path(prefix: str, size: str, mode: str) -> Path:
     return NSYS_DIR / f"benchmark__{prefix}__{size}__{mode}__seq128__warm5.nsys-rep"
 
@@ -62,43 +54,76 @@ def _compute_comparison(
             bf_val = bf.get(metric, 0)
 
         if fp_val and bf_val:
-            rows.append([
-                size,
-                f"{fp_val / 1e6:.2f}",
-                f"{bf_val / 1e6:.2f}",
-                f"{fp_val / bf_val:.2f}x",
-            ])
+            rows.append(
+                [
+                    size,
+                    f"{fp_val / 1e6:.2f}",
+                    f"{bf_val / 1e6:.2f}",
+                    f"{fp_val / bf_val:.2f}x",
+                ]
+            )
     return rows
 
 
-def analyze() -> None:
-    """Run analysis and print results."""
-    print_table(
-        "Forward Pass Comparison (Median Time in ms)",
-        ["Model", "Full Precision", "BF16 Mixed", "Speedup"],
-        _compute_comparison("new_base", "autocastBF", "FWD", "forward"),
-    )
+CONCLUSIONS = dedent("""\
 
-    print_table(
-        "Forward+Backward Pass Comparison (Median Time in ms)",
-        ["Model", "Full Precision", "BF16 Mixed", "Speedup"],
-        _compute_comparison("new_base", "autocastBF", "FWD_BWD", "total"),
-    )
+##### Conclusions
 
-    print_table(
-        "Attention Score Computation (Median Time in ms)",
-        ["Model", "Full Precision", "BF16 Mixed", "Speedup"],
-        _compute_comparison("new_base", "autocastBF", "FWD", "attn_scores"),
-    )
+1. BF16 mixed precision is slower (5-12%) on small-medium models \
+due to autocast type conversion overhead (copy kernels dominate)
+2. Attention score computation shows 1.2x-3.3x speedup with BF16 \
+larger models benefit more from reduced precision matmul
+3. As model size increases, BF16 disadvantage decreases \
+because compute time dominates conversion overhead
+    """)
 
-    print("\n## Conclusions\n")
-    print("1. BF16 mixed precision is slower (5-12%) on small-medium models")
-    print("   due to autocast type conversion overhead (copy kernels dominate)")
-    print("2. Attention score computation shows 1.2x-3.3x speedup with BF16")
-    print("   larger models benefit more from reduced precision matmul")
-    print("3. As model size increases, BF16 disadvantage decreases")
-    print("   because compute time dominates conversion overhead")
+
+def _generate_analysis(
+    base_prefix: str = "new_base", mixed_prefix: str = "autocastBF"
+) -> str:
+    """Generate full analysis as markdown string."""
+    headers = ["Model", "Full Precision", "BF16 Mixed", "Speedup"]
+    sections = [
+        ("Forward Pass Comparison (Median Time in ms)", "FWD", "forward"),
+        ("Forward+Backward Pass Comparison (Median Time in ms)", "FWD_BWD", "total"),
+        ("Attention Score Computation (Median Time in ms)", "FWD", "attn_scores"),
+    ]
+    parts = []
+    for title, mode, metric in sections:
+        rows = _compute_comparison(base_prefix, mixed_prefix, mode, metric)
+        parts.append(format_table(f"\n##### {title}", headers, rows))
+    parts.append(CONCLUSIONS)
+    return "\n".join(parts)
+
+
+def analyze(base_prefix: str = "new_base", mixed_prefix: str = "autocastBF") -> str:
+    """Run analysis and return results as string."""
+    result = "\n#### Mixed Precision Analysis\n" + _generate_analysis(
+        base_prefix, mixed_prefix
+    )
+    print(result)
+    return result
 
 
 if __name__ == "__main__":
-    analyze()
+    parser = argparse.ArgumentParser(description="Analyze mixed precision benchmarks")
+    parser.add_argument(
+        "--base-prefix",
+        type=str,
+        default="new_base",
+        help="Base run prefix (default: new_base)",
+    )
+    parser.add_argument(
+        "--mixed-prefix",
+        type=str,
+        default="autocastBF",
+        help="Mixed precision run prefix (default: autocastBF)",
+    )
+    args = parser.parse_args()
+
+    result = analyze(args.base_prefix, args.mixed_prefix)
+
+    output_path = Path("docs/sections/mixed-precision.md")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(result)
+    print(f"\nMarkdown saved: {output_path}")

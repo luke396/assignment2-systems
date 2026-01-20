@@ -180,6 +180,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cs336-basics" },
     { name = "humanfriendly" },
+    { name = "jinja2" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
@@ -197,6 +198,7 @@ dependencies = [
 requires-dist = [
     { name = "cs336-basics", editable = "cs336-basics" },
     { name = "humanfriendly" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas", specifier = ">=2" },

@@ -19,6 +19,7 @@ dependencies = [
     "ty>=0.0.1a16",
     "ruff>=0.14.1",
     "tabulate>=0.9.0",
+    "jinja2>=3.1.6",
 ]
 
 [build-system]
@@ -52,7 +53,7 @@ extend-exclude = ["tests"]
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["F722", "D203", "D213", "S101", "COM812", "T201"]
+ignore = ["F722", "D203", "D213", "S101", "COM812", "T201", "S603", "S607"]
 
 [tool.ty.src]
 # Exclude cs336-basics/** because it's an editable dependency with its own pyproject.toml.
