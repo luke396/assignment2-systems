@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
 """Analyze nsys profile results for forward/backward pass benchmarks."""
-# ruff: noqa: S603
 
 import argparse
+import io
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
@@ -150,7 +150,7 @@ def parse_kernel_sum(output: str) -> list[KernelInfo]:
 
 def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
     """Print a formatted markdown table with aligned columns."""
-    print(f"\n{title}\n")
+    print(f"{title}\n")
     if not rows:
         return
 
@@ -162,6 +162,7 @@ def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
     for row in rows:
         cells = " | ".join(c.ljust(w) for c, w in zip(row, widths, strict=True))
         print(f"| {cells} |")
+    print()
 
 
 def _calc_gemm_pct(kernels: list[KernelInfo]) -> float:
@@ -249,18 +250,26 @@ def _build_metric_table(
 
 def _analyze_forward_timing(run_tag: str, oom_status: OomStatus) -> None:
     """Analyze forward pass timing."""
-    print("## (a) Forward Pass Timing\n")
+    print("#### (a) Forward Pass Timing\n")
     rows = _build_metric_table(
         run_tag,
         oom_status,
         lambda rt, sz, sl, oom: _get_value_or_status(rt, sz, sl, "FWD", oom),
     )
     print_table("Forward Pass Avg Time (ms)", SEQ_HEADERS, rows)
+    conclusions = (
+        "The time of nsys is a "
+        "little slower than python version. A reasonable explanation is profiling "
+        "overhead and run-to-run variance; the NVTX ranges are measured under "
+        "the profiler and can be slower even if the benchmark "
+        "uses torch.cuda.synchronize()."
+    )
+    print(conclusions + "\n")
 
 
 def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> None:
     """Analyze non-GEMM kernels for all models in compact table format."""
-    print("\n## (c) Non-GEMM Kernels in Forward Pass\n")
+    print("#### (c) Non-GEMM Kernels in Forward Pass\n")
 
     for size in SIZES:
         headers = ["Seq Len", "Top Non-GEMM Kernel", "Time%", "Total", "Inst"]
@@ -290,14 +299,20 @@ def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> None:
                 rows.append([f"seq{seq_len}", "N/A", "-", "-", "-"])
 
         if rows:
-            print_table(
-                (f"{size} Top Non-GEMM Kernel per Sequence Length"), headers, rows
-            )
+            title = f"{size} Top Non-GEMM Kernel per Sequence Length"
+            print_table(title, headers, rows)
+        conclusion = (
+            "The most time-consuming "
+            "non-GEMM kernels are element wise copy, as seq length "
+            "increases, elementwise kernels (activations, copy, etc.) take "
+            "a larger proportion of time due to more data being processed."
+        )
+        print(conclusion + "\n")
 
 
 def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
     """Analyze GEMM fraction in inference vs training for all models."""
-    print("\n## (d) GEMM Fraction: Inference vs Training\n")
+    print("#### (d) GEMM Fraction: Inference vs Training\n")
 
     for size in SIZES:
         headers = ["Seq Len", "Inference", "Training"]
@@ -317,6 +332,20 @@ def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
 
         if rows:
             print_table(f"{size} GEMM Fraction", headers, rows)
+    conclusion1 = (
+        "Non-GEMM kernels become more significant as sequence length increases."
+    )
+    conclusion2 = (
+        "Training has a lower GEMM fraction than "
+        "inference due to additional non-GEMM operations in the backward "
+        "pass (e.g., elementwise ops for gradients)."
+    )
+    conclusion3 = (
+        "As model size increases, GEMM fraction tends to "
+        "increase because larger models have more compute-intensive matrix "
+        "multiplications relative to non-GEMM ops."
+    )
+    print(f"{conclusion1} \n\n {conclusion2} \n\n {conclusion3}\n\n")
 
 
 def _get_attn_metric(
@@ -332,16 +361,14 @@ def _get_attn_metric(
 
     stats = _get_nvtx_stats(run_tag, size, "FWD", seq_len, "forward")
 
-    if metric_type == "softmax":
-        if "softmax" in stats:
-            return _format_ms(stats["softmax"]["total_ns"])
-    elif metric_type == "matmul":
-        if "attn_scores" in stats and "final_matmul" in stats:
-            matmul_ns = (
-                stats["attn_scores"]["total_ns"] + stats["final_matmul"]["total_ns"]
-            )
-            return _format_ms(matmul_ns)
-    elif metric_type == "ratio":
+    if metric_type == "softmax" and "softmax" in stats:
+        return _format_ms(stats["softmax"]["total_ns"])
+
+    if metric_type == "matmul" and "attn_scores" in stats and "final_matmul" in stats:
+        matmul_ns = stats["attn_scores"]["total_ns"] + stats["final_matmul"]["total_ns"]
+        return _format_ms(matmul_ns)
+
+    if metric_type == "ratio":
         ratio = _calc_softmax_ratio(stats)
         if ratio is not None:
             return f"{ratio:.1%}"
@@ -354,7 +381,7 @@ def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> None:
 
     Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
     """
-    print(f"\n## (e) Softmax vs Matmul in Attention (iteration {NVTX_INSTANCE})\n")
+    print(f"#### (e) Softmax vs Matmul in Attention (iteration {NVTX_INSTANCE})\n")
 
     for metric_type, title in [
         ("softmax", "Softmax Time (ms)"),
@@ -370,6 +397,39 @@ def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> None:
             for size in SIZES
         ]
         print_table(title, SEQ_HEADERS, rows)
+    conclusion1 = (
+        "Bigger seq length, softmax time increases "
+        "faster than matmul time, leading to a higher softmax/matmul ratio. This is "
+        "because softmax involves more elementwise operations and reductions "
+        "that scale quadratically with sequence length, while matmul benefits "
+        "from optimized GPU kernels."
+    )
+    conclusion2 = (
+        "For one head and one "
+        "batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. "
+        "Computing attention scores is 2 x seq x head_dim x seq, and the final matmul "
+        "is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs "
+        "ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). "
+        "In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%."
+    )
+    conclusion3 = """
+```shell
+m x (n-1)  get row max
+m x n      minus max
+m x n      exp
+m x (n-1)  get sum
+m x n      divide
+```
+"""
+    conclusion4 = (
+        "The time spent computing "
+        "softmax is much higher than its FLOPs ratio, likely because softmax is "
+        "elementwise and memory-bound (more memory traffic), while GEMM kernels "
+        "are highly optimized and more compute-bound. A possible improvement is "
+        "to use a fused kernel to avoid intermediate softmax stores/loads, trading "
+        "a bit more compute for less memory access."
+    )
+    print(f"{conclusion1} \n\n {conclusion2} \n\n {conclusion3} \n\n {conclusion4}\n\n")
 
 
 def _get_value_or_status(
@@ -410,7 +470,7 @@ def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> None:
 
     Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
     """
-    print(f"\n## (b) Single Pass Analysis (iteration {NVTX_INSTANCE})\n")
+    print(f"#### (b) Dominant Kernels (iteration {NVTX_INSTANCE})\n")
 
     def get_kernel(mode: str, nvtx_range: str, seq_len: int) -> str:
         if oom_status.get((size, seq_len, mode), False):
@@ -434,17 +494,38 @@ def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> None:
             for seq_len in SEQ_LENS
         ]
         print_table(f"{size} Top Kernel per Pass", headers, rows)
+    conclusion = (
+        "The dominant kernel is "
+        "always GEMM for matrix multiplication. Forward's GEMM ratio is larger "
+        "than backward's because backward has more non-GEMM kernels (e.g., "
+        "elementwise ops for gradients). As seq_len increases, non-GEMM "
+        "kernels (e.g., elementwise ops) become more prominent due to more activations "
+        "and intermediate results."
+    )
+    print(conclusion + "\n")
 
 
-def analyze(run_tag: str) -> None:
-    """Run analysis and print results."""
-    print("# NSYS Profile Analysis\n")
-    oom_status = parse_oom_status(run_tag)
-    _analyze_forward_timing(run_tag, oom_status)
-    _analyze_single_pass_kernels(run_tag, oom_status)
-    _analyze_non_gemm_kernels(run_tag, oom_status)
-    _analyze_gemm_fraction(run_tag, oom_status)
-    _analyze_attention_ops(run_tag, oom_status)
+def analyze(run_tag: str) -> str:
+    """Run analysis and return results as string."""
+    output = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = output
+
+    try:
+        print("### Nsys Profile Analysis\n")
+        print(f">based on nsys reports with run tag `{run_tag}`\n")
+        oom_status = parse_oom_status(run_tag)
+        _analyze_forward_timing(run_tag, oom_status)
+        _analyze_single_pass_kernels(run_tag, oom_status)
+        _analyze_non_gemm_kernels(run_tag, oom_status)
+        _analyze_gemm_fraction(run_tag, oom_status)
+        _analyze_attention_ops(run_tag, oom_status)
+    finally:
+        sys.stdout = old_stdout
+
+    result = output.getvalue()
+    print(result)
+    return result
 
 
 if __name__ == "__main__":
@@ -458,4 +539,10 @@ if __name__ == "__main__":
         help="Run tag to analyze (default: new_base)",
     )
     args = parser.parse_args()
-    analyze(args.run_tag)
+
+    result = analyze(args.run_tag)
+
+    output_path = Path("docs/sections/nsys-profile.md")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(result)
+    print(f"\nMarkdown saved: {output_path}")
