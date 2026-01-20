@@ -69,6 +69,6 @@
 
 The table above shows benchmark results for different model configurations across various sequence lengths. Results include both forward-only (inference) and forward+backward (training) passes. Time is recorded and measured with python's time module.
 
-#### Warm up 
+#### Warm up
 
 The first step is cost longer time than the rest. With warm up, the time of train or inference are stable.

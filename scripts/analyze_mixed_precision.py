@@ -4,9 +4,10 @@
 import argparse
 import subprocess
 from pathlib import Path
+from textwrap import dedent
 
-SIZES = ["small", "medium", "large", "xl", "2.7B"]
-NSYS_DIR = Path("output/nsys")
+from scripts.constants import NSYS_DIR, SIZES
+from scripts.table_utils import format_table
 
 
 def get_nvtx_stats(report_path: Path) -> dict[str, float]:
@@ -30,15 +31,6 @@ def get_nvtx_stats(report_path: Path) -> dict[str, float]:
         elif "scaled dot product attention" in line:
             stats["sdpa"] = float(line.split()[3].replace(",", ""))
     return stats
-
-
-def _format_table(title: str, headers: list[str], rows: list[list[str]]) -> str:
-    """Format a markdown table with title."""
-    lines = [f"\n##### {title}\n"]
-    lines.append("| " + " | ".join(headers) + " |")
-    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-    lines.extend("| " + " | ".join(row) + " |" for row in rows)
-    return "\n".join(lines)
 
 
 def _build_path(prefix: str, size: str, mode: str) -> Path:
@@ -73,14 +65,17 @@ def _compute_comparison(
     return rows
 
 
-CONCLUSIONS = """\n##### Conclusions
+CONCLUSIONS = dedent("""\
 
-1. BF16 mixed precision is slower (5-12%) on small-medium models
-   due to autocast type conversion overhead (copy kernels dominate)
-2. Attention score computation shows 1.2x-3.3x speedup with BF16
-   larger models benefit more from reduced precision matmul
-3. As model size increases, BF16 disadvantage decreases
-   because compute time dominates conversion overhead"""
+##### Conclusions
+
+1. BF16 mixed precision is slower (5-12%) on small-medium models \
+due to autocast type conversion overhead (copy kernels dominate)
+2. Attention score computation shows 1.2x-3.3x speedup with BF16 \
+larger models benefit more from reduced precision matmul
+3. As model size increases, BF16 disadvantage decreases \
+because compute time dominates conversion overhead
+    """)
 
 
 def _generate_analysis(
@@ -96,7 +91,7 @@ def _generate_analysis(
     parts = []
     for title, mode, metric in sections:
         rows = _compute_comparison(base_prefix, mixed_prefix, mode, metric)
-        parts.append(_format_table(title, headers, rows))
+        parts.append(format_table(f"\n##### {title}", headers, rows))
     parts.append(CONCLUSIONS)
     return "\n".join(parts)
 

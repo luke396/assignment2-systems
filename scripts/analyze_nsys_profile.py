@@ -1,16 +1,13 @@
 """Analyze nsys profile results for forward/backward pass benchmarks."""
 
 import argparse
-import io
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
-SIZES = ["small", "medium", "large", "xl", "2.7B"]
-SEQ_LENS = [128, 256, 512, 1024]
-NSYS_DIR = Path("output/nsys")
+from scripts.constants import NSYS_DIR, NVTX_INSTANCE, SEQ_LENS, SIZES
+
 MIN_KERNEL_PARTS = 10
 MIN_BENCHMARK_TABLE_COLS = 6
 ATTN_KEYS = ("softmax", "attn_scores", "final_matmul")
@@ -19,7 +16,6 @@ ATTN_MARKERS = {
     "computing softmax": "softmax",
     "final matmul": "final_matmul",
 }
-NVTX_INSTANCE = 6  # Which iteration to analyze for single-pass kernel stats
 NvtxStats: TypeAlias = dict[str, dict[str, float]]
 KernelInfo: TypeAlias = dict[str, str | float | bool]
 OomStatus: TypeAlias = dict[tuple[str, int, str], bool]
@@ -148,21 +144,24 @@ def parse_kernel_sum(output: str) -> list[KernelInfo]:
     return kernels[:10]
 
 
-def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
-    """Print a formatted markdown table with aligned columns."""
-    print(f"{title}\n")
+def _format_table_aligned(
+    title: str, headers: list[str], rows: list[list[str]]
+) -> str:
+    """Format a markdown table with aligned columns."""
     if not rows:
-        return
+        return f"{title}\n\nNo data available.\n\n"
 
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
     hdr = " | ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True))
     sep = " | ".join("-" * w for w in widths)
-    print(f"| {hdr} |")
-    print(f"| {sep} |")
-    for row in rows:
-        cells = " | ".join(c.ljust(w) for c, w in zip(row, widths, strict=True))
-        print(f"| {cells} |")
-    print()
+
+    lines = [f"{title}\n", f"| {hdr} |", f"| {sep} |"]
+    lines.extend(
+        f"| {' | '.join(c.ljust(w) for c, w in zip(row, widths, strict=True))} |"
+        for row in rows
+    )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _calc_gemm_pct(kernels: list[KernelInfo]) -> float:
@@ -248,28 +247,29 @@ def _build_metric_table(
     ]
 
 
-def _analyze_forward_timing(run_tag: str, oom_status: OomStatus) -> None:
+def _analyze_forward_timing(run_tag: str, oom_status: OomStatus) -> str:
     """Analyze forward pass timing."""
-    print("#### (a) Forward Pass Timing\n")
+    parts = ["#### (a) Forward Pass Timing\n"]
     rows = _build_metric_table(
         run_tag,
         oom_status,
         lambda rt, sz, sl, oom: _get_value_or_status(rt, sz, sl, "FWD", oom),
     )
-    print_table("Forward Pass Avg Time (ms)", SEQ_HEADERS, rows)
+    parts.append(_format_table_aligned("Forward Pass Avg Time (ms)", SEQ_HEADERS, rows))
     conclusions = (
         "The time of nsys is a "
         "little slower than python version. A reasonable explanation is profiling "
         "overhead and run-to-run variance; the NVTX ranges are measured under "
         "the profiler and can be slower even if the benchmark "
-        "uses torch.cuda.synchronize()."
+        "uses torch.cuda.synchronize().\n"
     )
-    print(conclusions + "\n")
+    parts.append(conclusions)
+    return "\n".join(parts)
 
 
-def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> None:
+def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> str:
     """Analyze non-GEMM kernels for all models in compact table format."""
-    print("#### (c) Non-GEMM Kernels in Forward Pass\n")
+    parts = ["#### (c) Non-GEMM Kernels in Forward Pass\n"]
 
     for size in SIZES:
         headers = ["Seq Len", "Top Non-GEMM Kernel", "Time%", "Total", "Inst"]
@@ -300,19 +300,21 @@ def _analyze_non_gemm_kernels(run_tag: str, oom_status: OomStatus) -> None:
 
         if rows:
             title = f"{size} Top Non-GEMM Kernel per Sequence Length"
-            print_table(title, headers, rows)
-        conclusion = (
-            "The most time-consuming "
-            "non-GEMM kernels are element wise copy, as seq length "
-            "increases, elementwise kernels (activations, copy, etc.) take "
-            "a larger proportion of time due to more data being processed."
-        )
-        print(conclusion + "\n")
+            parts.append(_format_table_aligned(title, headers, rows))
+
+    conclusion = (
+        "The most time-consuming "
+        "non-GEMM kernels are element wise copy, as seq length "
+        "increases, elementwise kernels (activations, copy, etc.) take "
+        "a larger proportion of time due to more data being processed.\n"
+    )
+    parts.append(conclusion)
+    return "\n".join(parts)
 
 
-def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
+def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> str:
     """Analyze GEMM fraction in inference vs training for all models."""
-    print("#### (d) GEMM Fraction: Inference vs Training\n")
+    parts = ["#### (d) GEMM Fraction: Inference vs Training\n"]
 
     for size in SIZES:
         headers = ["Seq Len", "Inference", "Training"]
@@ -331,7 +333,8 @@ def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
             rows.append(row)
 
         if rows:
-            print_table(f"{size} GEMM Fraction", headers, rows)
+            parts.append(_format_table_aligned(f"{size} GEMM Fraction", headers, rows))
+
     conclusion1 = (
         "Non-GEMM kernels become more significant as sequence length increases."
     )
@@ -345,7 +348,8 @@ def _analyze_gemm_fraction(run_tag: str, oom_status: OomStatus) -> None:
         "increase because larger models have more compute-intensive matrix "
         "multiplications relative to non-GEMM ops."
     )
-    print(f"{conclusion1} \n\n {conclusion2} \n\n {conclusion3}\n\n")
+    parts.append(f"{conclusion1}\n\n{conclusion2}\n\n{conclusion3}\n")
+    return "\n".join(parts)
 
 
 def _get_attn_metric(
@@ -376,12 +380,12 @@ def _get_attn_metric(
     return "N/A"
 
 
-def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> None:
+def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> str:
     """Analyze softmax vs matmul in attention for a single forward pass.
 
     Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
     """
-    print(f"#### (e) Softmax vs Matmul in Attention (iteration {NVTX_INSTANCE})\n")
+    parts = [f"#### (e) Softmax vs Matmul in Attention (iteration {NVTX_INSTANCE})\n"]
 
     for metric_type, title in [
         ("softmax", "Softmax Time (ms)"),
@@ -396,7 +400,8 @@ def _analyze_attention_ops(run_tag: str, oom_status: OomStatus) -> None:
             ]
             for size in SIZES
         ]
-        print_table(title, SEQ_HEADERS, rows)
+        parts.append(_format_table_aligned(title, SEQ_HEADERS, rows))
+
     conclusion1 = (
         "Bigger seq length, softmax time increases "
         "faster than matmul time, leading to a higher softmax/matmul ratio. This is "
@@ -429,7 +434,8 @@ m x n      divide
         "to use a fused kernel to avoid intermediate softmax stores/loads, trading "
         "a bit more compute for less memory access."
     )
-    print(f"{conclusion1} \n\n {conclusion2} \n\n {conclusion3} \n\n {conclusion4}\n\n")
+    parts.append(f"{conclusion1}\n\n{conclusion2}\n\n{conclusion3}\n\n{conclusion4}\n")
+    return "\n".join(parts)
 
 
 def _get_value_or_status(
@@ -465,12 +471,12 @@ def _get_top_kernel_str(
     return "N/A"
 
 
-def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> None:
+def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> str:
     """Analyze kernels within single forward/backward pass in compact table format.
 
     Uses the iteration specified by NVTX_INSTANCE constant (default: 6th).
     """
-    print(f"#### (b) Dominant Kernels (iteration {NVTX_INSTANCE})\n")
+    parts = [f"#### (b) Dominant Kernels (iteration {NVTX_INSTANCE})\n"]
 
     def get_kernel(mode: str, nvtx_range: str, seq_len: int) -> str:
         if oom_status.get((size, seq_len, mode), False):
@@ -493,37 +499,36 @@ def _analyze_single_pass_kernels(run_tag: str, oom_status: OomStatus) -> None:
             ]
             for seq_len in SEQ_LENS
         ]
-        print_table(f"{size} Top Kernel per Pass", headers, rows)
+        title = f"{size} Top Kernel per Pass"
+        parts.append(_format_table_aligned(title, headers, rows))
+
     conclusion = (
         "The dominant kernel is "
         "always GEMM for matrix multiplication. Forward's GEMM ratio is larger "
         "than backward's because backward has more non-GEMM kernels (e.g., "
         "elementwise ops for gradients). As seq_len increases, non-GEMM "
         "kernels (e.g., elementwise ops) become more prominent due to more activations "
-        "and intermediate results."
+        "and intermediate results.\n"
     )
-    print(conclusion + "\n")
+    parts.append(conclusion)
+    return "\n".join(parts)
 
 
 def analyze(run_tag: str) -> str:
     """Run analysis and return results as string."""
-    output = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = output
+    parts = [
+        "### Nsys Profile Analysis\n",
+        f">based on nsys reports with run tag `{run_tag}`\n",
+    ]
 
-    try:
-        print("### Nsys Profile Analysis\n")
-        print(f">based on nsys reports with run tag `{run_tag}`\n")
-        oom_status = parse_oom_status(run_tag)
-        _analyze_forward_timing(run_tag, oom_status)
-        _analyze_single_pass_kernels(run_tag, oom_status)
-        _analyze_non_gemm_kernels(run_tag, oom_status)
-        _analyze_gemm_fraction(run_tag, oom_status)
-        _analyze_attention_ops(run_tag, oom_status)
-    finally:
-        sys.stdout = old_stdout
+    oom_status = parse_oom_status(run_tag)
+    parts.append(_analyze_forward_timing(run_tag, oom_status))
+    parts.append(_analyze_single_pass_kernels(run_tag, oom_status))
+    parts.append(_analyze_non_gemm_kernels(run_tag, oom_status))
+    parts.append(_analyze_gemm_fraction(run_tag, oom_status))
+    parts.append(_analyze_attention_ops(run_tag, oom_status))
 
-    result = output.getvalue()
+    result = "\n".join(parts)
     print(result)
     return result
 

@@ -73,7 +73,7 @@
 
 The table above shows benchmark results for different model configurations across various sequence lengths. Results include both forward-only (inference) and forward+backward (training) passes. Time is recorded and measured with python's time module.
 
-#### Warm up 
+#### Warm up
 
 The first step is cost longer time than the rest. With warm up, the time of train or inference are stable.
 
@@ -103,8 +103,8 @@ small Top Kernel per Pass
 | ------- | ------------------------------------ | ------------------------------------ | ------------------------------------ |
 | seq128  | void cutlass::Kernel2<cut... (58.2%) | void cutlass::Kernel2<cut... (58.3%) | void cutlass::Kernel2<cut... (17.0%) |
 | seq256  | void cutlass::Kernel2<cut... (52.5%) | void cutlass::Kernel2<cut... (52.6%) | void cutlass::Kernel2<cut... (24.0%) |
-| seq512  | void cutlass::Kernel2<cut... (72.1%) | void cutlass::Kernel2<cut... (71.0%) | N/A                                  |
-| seq1024 | void cutlass::Kernel2<cut... (40.8%) | N/A                                  | void cutlass::Kernel2<cut... (15.2%) |
+| seq512  | void cutlass::Kernel2<cut... (72.1%) | void cutlass::Kernel2<cut... (71.0%) | void cutlass::Kernel2<cut... (25.6%) |
+| seq1024 | void cutlass::Kernel2<cut... (40.8%) | void cutlass::Kernel2<cut... (41.3%) | void cutlass::Kernel2<cut... (15.2%) |
 
 medium Top Kernel per Pass
 
@@ -155,8 +155,6 @@ small Top Non-GEMM Kernel per Sequence Length
 | seq512  | void at::native::elementwise_kernel<(int... | 4.0%  | 9.28 ms  | 360  |
 | seq1024 | void at::native::elementwise_kernel<(int... | 13.1% | 90.05 ms | 360  |
 
-The most time-consuming non-GEMM kernels are element wise copy, as seq length increases, elementwise kernels (activations, copy, etc.) take a larger proportion of time due to more data being processed.
-
 medium Top Non-GEMM Kernel per Sequence Length
 
 | Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
@@ -165,8 +163,6 @@ medium Top Non-GEMM Kernel per Sequence Length
 | seq256  | void at::native::elementwise_kernel<(int... | 2.2%  | 7.19 ms  | 1440 |
 | seq512  | void at::native::elementwise_kernel<(int... | 5.3%  | 37.36 ms | 720  |
 | seq1024 | OOM                                         | -     | -        | -    |
-
-The most time-consuming non-GEMM kernels are element wise copy, as seq length increases, elementwise kernels (activations, copy, etc.) take a larger proportion of time due to more data being processed.
 
 large Top Non-GEMM Kernel per Sequence Length
 
@@ -177,8 +173,6 @@ large Top Non-GEMM Kernel per Sequence Length
 | seq512  | OOM                                         | -     | -        | -    |
 | seq1024 | OOM                                         | -     | -        | -    |
 
-The most time-consuming non-GEMM kernels are element wise copy, as seq length increases, elementwise kernels (activations, copy, etc.) take a larger proportion of time due to more data being processed.
-
 xl Top Non-GEMM Kernel per Sequence Length
 
 | Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
@@ -187,8 +181,6 @@ xl Top Non-GEMM Kernel per Sequence Length
 | seq256  | OOM                                         | -     | -        | -    |
 | seq512  | OOM                                         | -     | -        | -    |
 | seq1024 | OOM                                         | -     | -        | -    |
-
-The most time-consuming non-GEMM kernels are element wise copy, as seq length increases, elementwise kernels (activations, copy, etc.) take a larger proportion of time due to more data being processed.
 
 2.7B Top Non-GEMM Kernel per Sequence Length
 
@@ -248,12 +240,11 @@ xl GEMM Fraction
 | seq512  | OOM       | OOM      |
 | seq1024 | OOM       | OOM      |
 
-Non-GEMM kernels become more significant as sequence length increases. 
+Non-GEMM kernels become more significant as sequence length increases.
 
- Training has a lower GEMM fraction than inference due to additional non-GEMM operations in the backward pass (e.g., elementwise ops for gradients). 
+Training has a lower GEMM fraction than inference due to additional non-GEMM operations in the backward pass (e.g., elementwise ops for gradients).
 
- As model size increases, GEMM fraction tends to increase because larger models have more compute-intensive matrix multiplications relative to non-GEMM ops.
-
+As model size increases, GEMM fraction tends to increase because larger models have more compute-intensive matrix multiplications relative to non-GEMM ops.
 
 #### (e) Softmax vs Matmul in Attention (iteration 6)
 
@@ -287,11 +278,11 @@ Softmax/Matmul Ratio
 | xl     | 53.3%  | OOM    | OOM    | OOM     |
 | 2.7B   | 55.0%  | OOM    | OOM    | OOM     |
 
-Bigger seq length, softmax time increases faster than matmul time, leading to a higher softmax/matmul ratio. This is because softmax involves more elementwise operations and reductions that scale quadratically with sequence length, while matmul benefits from optimized GPU kernels. 
+Bigger seq length, softmax time increases faster than matmul time, leading to a higher softmax/matmul ratio. This is because softmax involves more elementwise operations and reductions that scale quadratically with sequence length, while matmul benefits from optimized GPU kernels.
 
- For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%. 
+For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%.
 
- 
+
 ```shell
 m x (n-1)  get row max
 m x n      minus max
@@ -299,11 +290,9 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
- 
-
- The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
 
+The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
 ### Mix precision
 
@@ -381,6 +370,7 @@ Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTor
 | xl | 144.16 | 146.84 | 0.98x |
 | 2.7B | 155.02 | 629.84 | 0.25x |
 
+
 ##### Forward+Backward Pass Comparison (Median Time in ms)
 
 | Model | Full Precision | BF16 Mixed | Speedup |
@@ -388,6 +378,7 @@ Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTor
 | small | 85.71 | 105.35 | 0.81x |
 | medium | 119.69 | 141.50 | 0.85x |
 | large | 156.81 | 180.92 | 0.87x |
+
 
 ##### Attention Score Computation (Median Time in ms)
 
@@ -399,11 +390,9 @@ Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTor
 | xl | 0.56 | 0.18 | 3.07x |
 | 2.7B | 1.68 | 0.50 | 3.34x |
 
+
 ##### Conclusions
 
-1. BF16 mixed precision is slower (5-12%) on small-medium models
-   due to autocast type conversion overhead (copy kernels dominate)
-2. Attention score computation shows 1.2x-3.3x speedup with BF16
-   larger models benefit more from reduced precision matmul
-3. As model size increases, BF16 disadvantage decreases
-   because compute time dominates conversion overhead
+1. BF16 mixed precision is slower (5-12%) on small-medium models due to autocast type conversion overhead (copy kernels dominate)
+2. Attention score computation shows 1.2x-3.3x speedup with BF16 larger models benefit more from reduced precision matmul
+3. As model size increases, BF16 disadvantage decreases because compute time dominates conversion overhead
