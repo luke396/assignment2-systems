@@ -144,9 +144,7 @@ def parse_kernel_sum(output: str) -> list[KernelInfo]:
     return kernels[:10]
 
 
-def _format_table_aligned(
-    title: str, headers: list[str], rows: list[list[str]]
-) -> str:
+def _format_table_aligned(title: str, headers: list[str], rows: list[list[str]]) -> str:
     """Format a markdown table with aligned columns."""
     if not rows:
         return f"{title}\n\nNo data available.\n\n"
@@ -177,7 +175,7 @@ def _build_report_path(run_tag: str, size: str, mode: str, seq_len: int) -> Path
     return NSYS_DIR / name
 
 
-def _get_stats_with_filter(  # noqa: PLR0913 - All parameters needed for report generation
+def _get_stats_with_filter(
     run_tag: str,
     size: str,
     mode: str,
