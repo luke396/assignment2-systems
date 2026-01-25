@@ -53,14 +53,16 @@ METRIC_LABELS = {
 class RunOptions:
     """Runtime options for batch benchmark execution."""
 
-    nsys: bool
     nsys_output_dir: Path
-    nsys_prefix: str
-    nsys_delay: float
     run_tag: str | None
     output_dir: Path
     autocast: bool
     warmup_steps: int
+    python_time: bool
+    memory_profile: bool
+    memory_output_dir: Path
+    configs: tuple[ModelConfig, ...]
+    seq_lengths: tuple[int, ...]
 
 
 def _extract_float(pattern: str, text: str) -> float | None:
@@ -76,7 +78,21 @@ def _slugify(value: str) -> str:
 
 
 def _nsys_available() -> bool:
+    """Check if nsys is available on PATH."""
     return shutil.which("nsys") is not None
+
+
+def _nsys_cmd(report_prefix: Path) -> list[str]:
+    """Build nsys profiling command."""
+    return [
+        "nsys",
+        "profile",
+        "-o",
+        str(report_prefix),
+        "--force-overwrite=true",
+        "--trace=cuda,osrt,nvtx",
+        "--sample=cpu",
+    ]
 
 
 def _benchmark_cmd(
@@ -85,7 +101,8 @@ def _benchmark_cmd(
     forward_only: bool,
     context_length: int,
     warmup_steps: int,
-    autocast: bool = False,
+    options: RunOptions,
+    memory_output: Path | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -106,23 +123,12 @@ def _benchmark_cmd(
     ]
     if forward_only:
         cmd.append("--forward_only")
-    if autocast:
+    if options.autocast:
         cmd.append("--autocast")
-    return cmd
-
-
-def _nsys_cmd(report_prefix: Path, delay: float) -> list[str]:
-    cmd = [
-        "nsys",
-        "profile",
-        "-o",
-        str(report_prefix),
-        "--force-overwrite=true",
-        "--trace=cuda,osrt,nvtx",
-        "--sample=cpu",
-    ]
-    if delay > 0:
-        cmd.append(f"--delay={delay}")
+    if options.python_time:
+        cmd.append("--python-time")
+    if options.memory_profile and memory_output:
+        cmd.extend(["--memory-profile", "--memory-output", str(memory_output)])
     return cmd
 
 
@@ -141,73 +147,46 @@ def _is_oom_error(stdout: str | None, stderr: str | None) -> bool:
     )
 
 
-def _base_row(
+def _result_row(
     config: ModelConfig,
     *,
+    forward_only: bool,
     context_length: int,
     warmup_steps: int,
-    forward_only: bool,
+    result: str = "OK",
 ) -> dict:
+    """Build result row with common fields."""
     return {
         "Config": config.name,
         "Mode": MODE_LABELS[forward_only],
         "Seq Len": context_length,
         "Warmup Steps": warmup_steps,
+        "Result": result,
+        "Total Time (s)": None,
+        "Warmup Time (s)": None,
+        "Avg Time/Step (s)": None,
+        "Std Time/Step (s)": None,
     }
 
 
-def _parse_metrics(output: str) -> dict[str, float | None]:
-    return {
-        label: _extract_float(pattern, output)
-        for label, pattern in METRIC_PATTERNS.items()
-    }
-
-
-def _error_row(
-    config: ModelConfig,
-    *,
-    forward_only: bool,
-    context_length: int,
-    warmup_steps: int,
-    error: subprocess.CalledProcessError,
-) -> dict:
-    row = _base_row(
-        config,
-        forward_only=forward_only,
-        context_length=context_length,
-        warmup_steps=warmup_steps,
-    )
-    row.update(
-        {
-            "Result": "OOM" if _is_oom_error(error.stdout, error.stderr) else "ERROR",
-            "Total Time (s)": None,
-            "Warmup Time (s)": None,
-            "Avg Time/Step (s)": None,
-            "Std Time/Step (s)": None,
-        }
-    )
-    return row
-
-
-def _build_nsys_report_prefix(
+def _build_output_filename(
     options: RunOptions,
     config: ModelConfig,
     *,
     forward_only: bool,
     context_length: int,
     warmup_steps: int,
-) -> Path:
-    mode_label = "FWD" if forward_only else "FWD_BWD"
+) -> str:
+    """Build base filename for benchmark outputs (without extension)."""
+    mode_label = MODE_FILE_LABELS[MODE_LABELS[forward_only]]
     parts = [
-        options.nsys_prefix,
         options.run_tag,
         config.name,
         mode_label,
         f"seq{context_length}",
         f"warm{warmup_steps}",
     ]
-    name = "__".join(_slugify(part) for part in parts if part)
-    return options.nsys_output_dir / name
+    return "__".join(_slugify(part) for part in parts if part)
 
 
 def run_benchmark(
@@ -219,23 +198,31 @@ def run_benchmark(
     options: RunOptions,
 ) -> dict:
     """Run benchmark for a given configuration and parse results."""
+    base_name = _build_output_filename(
+        options,
+        config,
+        forward_only=forward_only,
+        context_length=context_length,
+        warmup_steps=warmup_steps,
+    )
+
+    memory_output = None
+    if options.memory_profile:
+        memory_output = options.memory_output_dir / f"{base_name}.snap"
+
     cmd = _benchmark_cmd(
         config,
         forward_only=forward_only,
         context_length=context_length,
         warmup_steps=warmup_steps,
-        autocast=options.autocast,
+        options=options,
+        memory_output=memory_output,
     )
-    if options.nsys:
-        cmd.append("--nvtx-attn")
-        report_prefix = _build_nsys_report_prefix(
-            options,
-            config,
-            forward_only=forward_only,
-            context_length=context_length,
-            warmup_steps=warmup_steps,
-        )
-        cmd = [*_nsys_cmd(report_prefix, options.nsys_delay), *cmd]
+
+    # NVTX mode: wrap with nsys (not in python_time or memory_profile mode)
+    if not options.python_time and not options.memory_profile:
+        report_prefix = options.nsys_output_dir / base_name
+        cmd = [*_nsys_cmd(report_prefix), *cmd]
 
     mode = MODE_LABELS[forward_only]
     label = f"{config.name} ({mode}, seq={context_length}, warmup={warmup_steps})"
@@ -247,21 +234,27 @@ def run_benchmark(
         print(f"Error running benchmark for {label}: {e}")
         print(f"stdout: {e.stdout}")
         print(f"stderr: {e.stderr}")
-        return _error_row(
+        error_type = "OOM" if _is_oom_error(e.stdout, e.stderr) else "ERROR"
+        return _result_row(
             config,
             forward_only=forward_only,
             context_length=context_length,
             warmup_steps=warmup_steps,
-            error=e,
+            result=error_type,
         )
 
-    row = _base_row(
+    row = _result_row(
         config,
         forward_only=forward_only,
         context_length=context_length,
         warmup_steps=warmup_steps,
     )
-    row.update({"Result": "OK", **_parse_metrics(result.stdout)})
+
+    # In Python timing mode, parse metrics from stdout
+    if options.python_time:
+        for metric, pattern in METRIC_PATTERNS.items():
+            row[metric] = _extract_float(pattern, result.stdout)
+
     return row
 
 
@@ -291,13 +284,13 @@ def _format_results(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_args() -> RunOptions:
-    parser = argparse.ArgumentParser(
-        description="Run benchmark grid and optionally profile with nsys."
-    )
+    config_names = [c.name for c in CONFIGS]
+    parser = argparse.ArgumentParser(description="Run benchmark grid.")
     parser.add_argument(
-        "--nsys",
-        action="store_true",
-        help="Profile each benchmark run with Nsight Systems.",
+        "--run-tag",
+        type=str,
+        default=None,
+        help="Optional tag added to output filenames.",
     )
     parser.add_argument(
         "--nsys-output-dir",
@@ -306,22 +299,10 @@ def _parse_args() -> RunOptions:
         help="Directory to store nsys reports (default: output/nsys).",
     )
     parser.add_argument(
-        "--nsys-prefix",
-        type=str,
-        default="benchmark",
-        help="Prefix for nsys report filenames.",
-    )
-    parser.add_argument(
-        "--nsys-delay",
-        type=float,
-        default=0.0,
-        help="Delay (seconds) before profiling starts.",
-    )
-    parser.add_argument(
-        "--run-tag",
-        type=str,
+        "--memory-output-dir",
+        type=Path,
         default=None,
-        help="Optional tag added to output filenames (auto when --nsys).",
+        help="Directory to store memory snapshots (default: output/memory).",
     )
     parser.add_argument(
         "--autocast",
@@ -334,33 +315,71 @@ def _parse_args() -> RunOptions:
         default=5,
         help="Number of warm-up steps (default: 5).",
     )
+    parser.add_argument(
+        "--python-time",
+        action="store_true",
+        help="Enable Python time mode with synchronize (generates md file).",
+    )
+    parser.add_argument(
+        "--memory-profile",
+        action="store_true",
+        help="Enable memory profiling (generates .snap files).",
+    )
+    parser.add_argument(
+        "--configs",
+        nargs="+",
+        choices=config_names,
+        default=None,
+        metavar="CONFIG",
+        help=f"Model configs to run (default: all). Choices: {', '.join(config_names)}",
+    )
+    parser.add_argument(
+        "--seq-lengths",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="LEN",
+        help=f"Sequence lengths to run (default: {', '.join(map(str, SEQ_LENGTHS))}).",
+    )
     args = parser.parse_args()
 
-    run_tag = args.run_tag or (strftime("%Y%m%d_%H%M%S") if args.nsys else None)
+    if args.python_time and args.memory_profile:
+        parser.error("--python-time and --memory-profile are mutually exclusive")
+
     output_dir = get_output_dir()
     nsys_dir = args.nsys_output_dir or (output_dir / "nsys")
     nsys_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir = args.memory_output_dir or (output_dir / "memory")
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-generate run_tag for modes that produce output files (NVTX, memory)
+    run_tag = args.run_tag or (None if args.python_time else strftime("%Y%m%d_%H%M%S"))
+
+    # Filter configs and seq_lengths
+    config_map = {c.name: c for c in CONFIGS}
+    if args.configs:
+        configs = tuple(config_map[name] for name in args.configs)
+    else:
+        configs = tuple(CONFIGS)
+    seq_lengths = tuple(args.seq_lengths) if args.seq_lengths else SEQ_LENGTHS
 
     return RunOptions(
-        nsys=args.nsys,
         nsys_output_dir=nsys_dir,
-        nsys_prefix=args.nsys_prefix,
-        nsys_delay=args.nsys_delay,
         run_tag=run_tag,
         output_dir=output_dir,
         autocast=args.autocast,
         warmup_steps=args.warmup_steps,
+        python_time=args.python_time,
+        memory_profile=args.memory_profile,
+        memory_output_dir=memory_dir,
+        configs=configs,
+        seq_lengths=seq_lengths,
     )
 
 
-def main() -> None:
-    """Run benchmarks for all configurations and output markdown table."""
-    options = _parse_args()
-    if options.nsys and not _nsys_available():
-        msg = "nsys not found on PATH. Install Nsight Systems or disable --nsys."
-        raise RuntimeError(msg)
-
-    results = [
+def _run_all_benchmarks(options: RunOptions) -> list[dict]:
+    """Run benchmarks for all configurations."""
+    return [
         run_benchmark(
             config,
             forward_only=forward_only,
@@ -368,19 +387,60 @@ def main() -> None:
             warmup_steps=options.warmup_steps,
             options=options,
         )
-        for config in CONFIGS
-        for context_length in SEQ_LENGTHS
+        for config in options.configs
+        for context_length in options.seq_lengths
         for forward_only in [True, False]
     ]
 
-    df = _format_results(pd.DataFrame(results))
 
-    tag_suffix = f"__{_slugify(options.run_tag)}" if options.run_tag else ""
+def _print_summary(results: list[dict], options: RunOptions) -> None:
+    """Print benchmark summary for NVTX/memory modes."""
+    successful = sum(1 for r in results if r["Result"] == "OK")
+    failed = [r for r in results if r["Result"] != "OK"]
 
-    # Save Markdown table
-    output_file = options.output_dir / f"benchmark_results{tag_suffix}.md"
-    output_file.write_text(f"### Benchmark Results\n\n{df.to_markdown(index=False)}\n")
-    print(f"Markdown table saved to {output_file}")
+    print(f"\n{'=' * 60}")
+    print("Benchmark Summary")
+    print(f"{'=' * 60}")
+    print(f"Total benchmarks: {len(results)}")
+    print(f"Successful: {successful}")
+    print(f"Failed: {len(failed)}")
+
+    if failed:
+        print("\nFailed benchmarks:")
+        for r in failed:
+            print(f"  - {r['Config']} ({r['Mode']}, seq={r['Seq Len']}): {r['Result']}")
+
+    if options.memory_profile:
+        print(f"\nMemory snapshots saved to: {options.memory_output_dir}")
+        print("Use PyTorch Memory Visualizer to analyze the snapshots.")
+    else:
+        print(f"\nNsys reports saved to: {options.nsys_output_dir}")
+        print("Use 'nsys-ui' or 'nsys stats' to analyze the reports.")
+
+
+def main() -> None:
+    """Run benchmarks for all configurations and output markdown table."""
+    options = _parse_args()
+
+    # Check nsys availability only in NVTX mode (not python_time or memory_profile)
+    if not options.python_time and not options.memory_profile and not _nsys_available():
+        msg = (
+            "nsys not found on PATH. Install Nsight Systems or use --python-time mode."
+        )
+        raise RuntimeError(msg)
+
+    results = _run_all_benchmarks(options)
+
+    if options.python_time:
+        df = _format_results(pd.DataFrame(results))
+        tag_suffix = f"__{_slugify(options.run_tag)}" if options.run_tag else ""
+        output_file = options.output_dir / f"benchmark_results{tag_suffix}.md"
+        md_content = f"### Benchmark Results\n\n{df.to_markdown(index=False)}\n"
+        output_file.write_text(md_content)
+        print(f"Markdown table saved to {output_file}")
+        return
+
+    _print_summary(results, options)
 
 
 if __name__ == "__main__":
