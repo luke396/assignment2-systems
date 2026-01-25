@@ -284,13 +284,13 @@ def run_benchmark() -> None:
     # Set model to training mode
     ctx.model.train()
 
-    # Run warm-up phase
-    warm_up_time = _run_warmup_steps(ctx)
-
     # Memory profiling: record history during measurement steps only
     memory_profiling_enabled = args.memory_profile and device.type == "cuda"
     if memory_profiling_enabled:
         torch.cuda.memory._record_memory_history(max_entries=1000000)  # type: ignore[attr-defined] # noqa: SLF001
+
+    # Run warm-up phase
+    warm_up_time = _run_warmup_steps(ctx)
 
     step_times, measurement_time = _run_measurement_steps(ctx)
 

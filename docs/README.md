@@ -396,3 +396,25 @@ Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTor
 1. BF16 mixed precision is slower (5-12%) on small-medium models due to autocast type conversion overhead (copy kernels dominate)
 2. Attention score computation shows 1.2x-3.3x speedup with BF16 larger models benefit more from reduced precision matmul
 3. As model size increases, BF16 disadvantage decreases because compute time dominates conversion overhead
+
+
+### Profile Memory Usage
+
+#### (a) Memory image for Forward only and Forward + Backward profiles
+
+Forward only:
+
+![2.7B_F_256](images/memory_2.7B_F_256.png)
+
+Forward + Backward:
+
+![2.7B_FB_256](images/memory_2.7B_F_B_256.png)
+Double click the line in the timeline, python frame and corresponding code will show below.
+
+#### (b) Table of peak memory usage
+
+| Model Size | Sequence Length | Forward Only Peak Memory (GB) | Forward + Backward Peak Memory (GB) |
+| ---------- | --------------- | ----------------------------- | ----------------------------------- |
+| 2.7B       | 128             | 18.51 GB                      | 57.18 GB                            |
+| 2.7B       | 256             | 25.34 GB                      | 66.09 GB                            |
+| 2.7B       | 512             | 44.17 GB                      | N/A                                 |
