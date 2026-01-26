@@ -73,9 +73,7 @@ class StepContext:
 
     def nvtx_range(self, name: str) -> AbstractContextManager[None]:
         """Create an NVTX range context if running on CUDA, otherwise a no-op."""
-        if self.is_cuda:
-            return nvtx.range(name)
-        return nullcontext()
+        return nvtx.range(name) if self.is_cuda else nullcontext()
 
 
 def parse_cli_args() -> Config:
@@ -193,8 +191,7 @@ def _run_single_step(ctx: StepContext, step: int) -> None:
         if ctx.run_inputs.autocast
         else nullcontext()
     )
-    # should only autocast forward and loss computation,
-    # same type in backward will be used automatically
+    # Autocast only forward and loss computation; backward uses same types automatically
     with autocast_ctx:
         _, loss = _forward_pass(ctx, data)
     if loss is not None:
@@ -284,6 +281,8 @@ def run_benchmark() -> None:
     ctx.model.train()
 
     # Memory profiling: record history during measurement steps only
+    # Using private PyTorch API - this is the official way to capture memory snapshots
+    # as documented in PyTorch memory profiling guide
     memory_profiling_enabled = args.memory_profile and device.type == "cuda"
     if memory_profiling_enabled:
         torch.cuda.memory._record_memory_history(max_entries=1000000)  # type: ignore[attr-defined] # noqa: SLF001

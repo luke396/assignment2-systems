@@ -25,9 +25,7 @@ _MAX_CALL_CHAIN_LEN = 40
 
 def format_size(size: int, unit: str = "auto") -> str:
     """Format bytes as human-readable string."""
-    kib = 1024
-    mib = kib**2
-    gib = kib**3
+    kib, mib, gib = 1024, 1024**2, 1024**3
 
     if unit == "GiB" or (unit == "auto" and size >= gib):
         return f"{size / gib:.1f} GiB"
@@ -74,6 +72,7 @@ def _categorize_blocks_py(name: str, line: int) -> tuple[str, str] | None:
 
     if name == "scaled_dot_product_attention":
         # Line 310: Q·K^T scores, Line 321: attention·V output
+        # 312 is the cutoff between these two operations in blocks.py
         if line <= 312:  # noqa: PLR2004
             return ("Act:AttnScores", f"Q.K^T:{line}")
         return ("Act:AttnOut", f"attn.V:{line}")
@@ -144,9 +143,7 @@ def _extract_call_chain(frames: list[dict], max_depth: int = 3) -> str:
     chain = []
     for frame in frames:
         filename = frame.get("filename", "")
-        if ".py" not in filename:
-            continue
-        if "conda" in filename or "python-3" in filename:
+        if ".py" not in filename or "conda" in filename or "python-3" in filename:
             continue
 
         name = frame.get("name", "")
@@ -162,8 +159,12 @@ def _extract_call_chain(frames: list[dict], max_depth: int = 3) -> str:
 
 def load_snapshot(path: Path) -> dict:
     """Load a pickle snapshot file."""
-    with path.open("rb") as f:
-        return pickle.load(f)  # noqa: S301 - PyTorch snapshots require pickle
+    try:
+        with path.open("rb") as f:
+            return pickle.load(f)  # noqa: S301 - PyTorch snapshots require pickle
+    except (FileNotFoundError, pickle.PickleError) as e:
+        msg = f"Failed to load snapshot {path}: {e}"
+        raise RuntimeError(msg) from e
 
 
 def analyze_snap(snap_path: Path) -> dict:
@@ -364,9 +365,7 @@ def build_top_allocs_table(results: dict, config_key: tuple) -> str:
     if config_key not in results:
         return ""
 
-    r = results[config_key]
-    top_allocs = r["top_allocs"]
-
+    top_allocs = results[config_key]["top_allocs"]
     headers = ["#", "Size", "Category", "Operation", "Call Chain"]
     rows = []
 

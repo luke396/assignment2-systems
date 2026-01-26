@@ -64,8 +64,12 @@ def parse_autocast_filename(filename: str) -> dict[str, str | int] | None:
 
 def load_snapshot(path: Path) -> dict:
     """Load a pickle snapshot file."""
-    with path.open("rb") as f:
-        return pickle.load(f)  # noqa: S301
+    try:
+        with path.open("rb") as f:
+            return pickle.load(f)  # noqa: S301 - PyTorch snapshots require pickle
+    except (FileNotFoundError, pickle.PickleError) as e:
+        msg = f"Failed to load snapshot {path}: {e}"
+        raise RuntimeError(msg) from e
 
 
 def calc_peak_memory(data: dict) -> int:
@@ -110,7 +114,6 @@ def generate_html_for_snapshots(
     html_dir.mkdir(parents=True, exist_ok=True)
 
     for (size, mode, seq_len), snap_path in snapshots.items():
-        # Build HTML filename
         if prefix:
             name_parts = [prefix, size, mode, f"seq{seq_len}"]
         else:
@@ -232,6 +235,8 @@ def build_combined_table(
 def _format_delta(base: int | None, other: int | None) -> str:
     """Format memory delta with percentage change."""
     if not base or not other:
+        return "N/A"
+    if base == 0:
         return "N/A"
     delta = other - base
     pct = (delta / base) * 100

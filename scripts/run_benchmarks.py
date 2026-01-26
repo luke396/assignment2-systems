@@ -134,17 +134,14 @@ def _benchmark_cmd(
 
 def _is_oom_error(stdout: str | None, stderr: str | None) -> bool:
     """Best-effort OOM detection from subprocess output."""
-    text = (stdout or "") + " " + (stderr or "")
-    text_lower = text.lower()
-    return any(
-        phrase in text_lower
-        for phrase in (
-            "out of memory",
-            "cuda out of memory",
-            "oom",
-            "cudnn error: cudnn_status_alloc_failed",
-        )
+    text = f"{stdout or ''} {stderr or ''}".lower()
+    oom_phrases = (
+        "out of memory",
+        "cuda out of memory",
+        "oom",
+        "cudnn error: cudnn_status_alloc_failed",
     )
+    return any(phrase in text for phrase in oom_phrases)
 
 
 def _result_row(
@@ -357,10 +354,11 @@ def _parse_args() -> RunOptions:
 
     # Filter configs and seq_lengths
     config_map = {c.name: c for c in CONFIGS}
-    if args.configs:
-        configs = tuple(config_map[name] for name in args.configs)
-    else:
-        configs = tuple(CONFIGS)
+    configs = (
+        tuple(config_map[name] for name in args.configs)
+        if args.configs
+        else tuple(CONFIGS)
+    )
     seq_lengths = tuple(args.seq_lengths) if args.seq_lengths else SEQ_LENGTHS
 
     return RunOptions(
