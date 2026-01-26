@@ -45,7 +45,7 @@ def parse_oom_status(run_tag: str) -> OomStatus:
             seq_len = int(parts[2])
             oom_status[(config, seq_len, "FWD")] = parts[4] == "OOM"
             oom_status[(config, seq_len, "FWD_BWD")] = parts[5] == "OOM"
-        except ValueError:
+        except (ValueError, IndexError):
             continue
 
     return oom_status
@@ -66,6 +66,8 @@ def run_nsys_stats(report_path: Path, report_type: str, nvtx_filter: str = "") -
     if nvtx_filter:
         cmd.extend(["--filter-nvtx", nvtx_filter])
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0 and result.stderr:
+        print(f"WARNING: nsys stats failed for {report_path}: {result.stderr.strip()}")
     return result.stdout
 
 

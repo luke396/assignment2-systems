@@ -133,11 +133,13 @@ def generate_random_data(
 def select_benchmark_device() -> torch.device:
     """Select a usable device, falling back to CPU if CUDA is unavailable/unusable."""
     if not torch.cuda.is_available():
+        print("WARNING: CUDA not available, falling back to CPU")
         return torch.device("cpu")
     try:
         torch.empty(1, device="cuda")
     # CUDA initialization can raise a mix of runtime and driver errors.
-    except (RuntimeError, OSError, AssertionError):
+    except (RuntimeError, OSError, AssertionError) as e:
+        print(f"WARNING: CUDA initialization failed ({e}), falling back to CPU")
         return torch.device("cpu")
     return torch.device("cuda")
 
@@ -247,6 +249,11 @@ def run_benchmark() -> None:
         python_time=args.python_time,
     )
     device = select_benchmark_device()
+
+    # Memory profiling requires CUDA
+    if args.memory_profile and device.type != "cuda":
+        msg = "--memory-profile requires CUDA but device is CPU"
+        raise RuntimeError(msg)
 
     # NVTX mode: enable attention-level NVTX ranges
     # (default, not in python_time or memory_profile)
