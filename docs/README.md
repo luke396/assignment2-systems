@@ -4,7 +4,7 @@
 
 ### Basic benchmarking Results
 
->based on `benchmark_results__5090.md`
+> based on `benchmark_results__5090.md`
 
 | Config | Seq Len | Warmup Steps | d_model |  d_ff | n_layers | num_heads | Status FWD | Status FWD+BWD | Total(s) FWD | Total(s) FWD+BWD | Warmup(s) FWD | Warmup(s) FWD+BWD | Avg/Step(s) FWD | Avg/Step(s) FWD+BWD | Std/Step(s) FWD | Std/Step(s) FWD+BWD |
 | :----- | ------: | -----------: | ------: | ----: | -------: | --------: | :--------- | :------------- | -----------: | ---------------: | ------------: | ----------------: | --------------: | ------------------: | --------------: | ------------------: |
@@ -79,7 +79,7 @@ The first step is cost longer time than the rest. With warm up, the time of trai
 
 ### Nsys Profile Analysis
 
->based on nsys reports with run tag `new_base`
+> based on nsys reports with run tag `new_base`
 
 #### (a) Forward Pass Timing
 
@@ -186,7 +186,7 @@ xl Top Non-GEMM Kernel per Sequence Length
 
 | Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
 | ------- | ------------------------------------------- | ----- | -------- | ---- |
-| seq128  | void at::native::vectorized_elementwise_... | 1.0%  | 11.76 ms | 960  |
+| seq128  | void at::native::vectorized*elementwise*... | 1.0%  | 11.76 ms | 960  |
 | seq256  | OOM                                         | -     | -        | -    |
 | seq512  | OOM                                         | -     | -        | -    |
 | seq1024 | OOM                                         | -     | -        | -    |
@@ -282,7 +282,6 @@ Bigger seq length, softmax time increases faster than matmul time, leading to a 
 
 For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%.
 
-
 ```shell
 m x (n-1)  get row max
 m x n      minus max
@@ -290,7 +289,6 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
-
 
 The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
@@ -357,42 +355,257 @@ The reason layerNorm remaing float32 is that layerNorm involves reductions (mean
 
 Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTorch autocast conservatively keeps LayerNorm in float32 for both FP16 and BF16. Theoretically BF16 could be used for LayerNorm, but the precision loss (7 mantissa bits vs 23) may affect training stability.
 
-
 #### Mixed Precision Analysis
 
 ##### Forward Pass Comparison (Median Time in ms)
 
-| Model | Full Precision | BF16 Mixed | Speedup |
-| --- | --- | --- | --- |
-| small | 75.89 | 79.35 | 0.96x |
-| medium | 94.93 | 103.34 | 0.92x |
-| large | 115.40 | 123.42 | 0.94x |
-| xl | 144.16 | 146.84 | 0.98x |
-| 2.7B | 155.02 | 629.84 | 0.25x |
-
+| Model  | Full Precision | BF16 Mixed | Speedup |
+| ------ | -------------- | ---------- | ------- |
+| small  | 75.89          | 79.35      | 0.96x   |
+| medium | 94.93          | 103.34     | 0.92x   |
+| large  | 115.40         | 123.42     | 0.94x   |
+| xl     | 144.16         | 146.84     | 0.98x   |
+| 2.7B   | 155.02         | 629.84     | 0.25x   |
 
 ##### Forward+Backward Pass Comparison (Median Time in ms)
 
-| Model | Full Precision | BF16 Mixed | Speedup |
-| --- | --- | --- | --- |
-| small | 85.71 | 105.35 | 0.81x |
-| medium | 119.69 | 141.50 | 0.85x |
-| large | 156.81 | 180.92 | 0.87x |
-
+| Model  | Full Precision | BF16 Mixed | Speedup |
+| ------ | -------------- | ---------- | ------- |
+| small  | 85.71          | 105.35     | 0.81x   |
+| medium | 119.69         | 141.50     | 0.85x   |
+| large  | 156.81         | 180.92     | 0.87x   |
 
 ##### Attention Score Computation (Median Time in ms)
 
-| Model | Full Precision | BF16 Mixed | Speedup |
-| --- | --- | --- | --- |
-| small | 0.31 | 0.23 | 1.35x |
-| medium | 0.24 | 0.19 | 1.27x |
-| large | 0.35 | 0.17 | 2.02x |
-| xl | 0.56 | 0.18 | 3.07x |
-| 2.7B | 1.68 | 0.50 | 3.34x |
-
+| Model  | Full Precision | BF16 Mixed | Speedup |
+| ------ | -------------- | ---------- | ------- |
+| small  | 0.31           | 0.23       | 1.35x   |
+| medium | 0.24           | 0.19       | 1.27x   |
+| large  | 0.35           | 0.17       | 2.02x   |
+| xl     | 0.56           | 0.18       | 3.07x   |
+| 2.7B   | 1.68           | 0.50       | 3.34x   |
 
 ##### Conclusions
 
 1. BF16 mixed precision is slower (5-12%) on small-medium models due to autocast type conversion overhead (copy kernels dominate)
 2. Attention score computation shows 1.2x-3.3x speedup with BF16 larger models benefit more from reduced precision matmul
 3. As model size increases, BF16 disadvantage decreases because compute time dominates conversion overhead
+
+### Profile Memory Usage
+
+#### (a) Memory image for Forward only and Forward + Backward profiles
+
+Forward only:
+
+![2.7B_F_256](images/memory_2.7B_F_256.png)
+
+Forward + Backward:
+
+![2.7B_FB_256](images/memory_2.7B_F_B_256.png)
+
+Double click the line in the timeline, python frame and corresponding code will show below.
+
+#### (b) Table of peak memory usage
+
+| Model Size | Sequence Length | Forward Only Peak Memory (GB) | Forward + Backward Peak Memory (GB) |
+| ---------- | --------------- | ----------------------------- | ----------------------------------- |
+| 2.7B       | 128             | 18.51 GB                      | 57.18 GB                            |
+| 2.7B       | 256             | 25.34 GB                      | 66.09 GB                            |
+| 2.7B       | 512             | 44.17 GB                      | N/A                                 |
+
+#### (c) Table of autocast peak memory usage
+
+| Model Size | Sequence Length | Forward Only Peak Memory (GB) | Forward + Backward Peak Memory (GB) |
+| ---------- | --------------- | ----------------------------- | ----------------------------------- |
+| 2.7B       | 128             | 22.76 GB                      | 61.39 GB                            |
+| 2.7B       | 256             | 27.51 GB                      | 66.72 GB                            |
+| 2.7B       | 512             | 39.23 GB                      | N/A                                 |
+
+##### Comparison: Baseline vs Autocast
+
+| Model Size | Seq Len | Baseline FWD | Autocast FWD | Δ FWD             | Baseline FWD+BWD | Autocast FWD+BWD | Δ FWD+BWD        |
+| ---------- | ------- | ------------ | ------------ | ----------------- | ---------------- | ---------------- | ---------------- |
+| 2.7B       | 128     | 18.51 GB     | 22.76 GB     | +4.26 GB (+23.0%) | 57.18 GB         | 61.39 GB         | +4.21 GB (+7.4%) |
+| 2.7B       | 256     | 25.34 GB     | 27.51 GB     | +2.16 GB (+8.5%)  | 66.09 GB         | 66.72 GB         | +0.62 GB (+0.9%) |
+| 2.7B       | 512     | 44.17 GB     | 39.23 GB     | -4.95 GB (-11.2%) | N/A              | N/A              | N/A              |
+
+Autocast increases memory usage in most cases, contrary to expectations.
+
+Root Cause Analysis: The custom implementations in `cs336_basics/blocks.py`
+prevent autocast from providing benefits:
+
+1. **Custom `Linear` using `einsum`** (blocks.py:48-50)
+   - `einsum` cannot trigger cuBLAS Tensor Core optimizations
+   - PyTorch's `torch.matmul` or `F.linear` would automatically use
+     Tensor Cores under autocast
+
+2. **Custom `scaled_dot_product_attention`** (blocks.py:289-321)
+   - Uses manual `einsum` for Q·K^T and attention·V computations
+   - Does not use `F.scaled_dot_product_attention` which provides
+     FlashAttention/Memory-Efficient Attention
+
+3. **Custom `softmax`** (blocks.py:281-286)
+   - Manual implementation without optimized CUDA kernels
+   - `F.softmax` has fused CUDA implementations
+
+4. **Type Conversion Overhead**
+   - Since custom ops are not recognized as "autocast-eligible",
+     frequent fp32 ↔ bf16 conversions occur
+   - Each `einsum` call may trigger unnecessary dtype casts
+   - Extra memory is allocated for intermediate tensors in different
+     precisions
+
+Expected vs Actual Flow:
+
+```
+Expected (with native PyTorch ops):
+  Input(fp32) → auto-cast to bf16 → Tensor Core compute → Output(bf16)
+  Memory: reduced by ~50% for activations
+
+Actual (with custom einsum ops):
+  Input(fp32) → cast bf16 → einsum(no Tensor Core) → cast fp32 → ...
+  Memory: increased due to duplicate tensors in both precisions
+```
+
+Conclusion:
+
+To benefit from autocast, the model should use PyTorch native operations:
+
+- Replace `einsum` in `Linear` with `F.linear` or `x @ weight.T`
+- Replace custom attention with `F.scaled_dot_product_attention`
+- Replace custom `softmax` with `F.softmax`
+
+However, since this is a course assignment (cs336), the custom
+implementations are intentional for educational purposes.
+
+#### (d) Residual Stream Activation Size (Single Precision)
+
+For fixed batch_size = 4, d_model = 2560, FP32 = 4 bytes
+
+| Seq Length | Calculation                | Size (MB)   |
+| ---------- | -------------------------- | ----------- |
+| 128        | 4 × 128 × 2560 × 4 / 1024² | **5.0 MB**  |
+| 256        | 4 × 256 × 2560 × 4 / 1024² | **10.0 MB** |
+| 512        | 4 × 512 × 2560 × 4 / 1024² | **20.0 MB** |
+
+We can see that **activation size scales linearly with seq_length** — when seq doubles, activation size also doubles.
+
+#### (e) Memory Allocation Analysis (Single-Step Peak)
+
+##### FWD seq128 - Max Single Allocation
+
+| Category   | Baseline | Autocast | Δ (MiB) |
+| ---------- | -------- | -------- | ------- |
+| AttnScores | 8.0 MiB  | 4.0 MiB  | -4.0    |
+| AttnOut    | 8.0 MiB  | 4.0 MiB  | -4.0    |
+| Softmax    | 8.0 MiB  | 8.0 MiB  | 0       |
+| FFN        | 20.0 MiB | 10.0 MiB | -10.0   |
+| Norm       | 5.0 MiB  | 5.0 MiB  | 0       |
+| Embed      | 5.0 MiB  | 5.0 MiB  | 0       |
+| Attn       | 5.0 MiB  | 2.5 MiB  | -2.5    |
+| einsum     | 20.0 MiB | 50.0 MiB | +30.0   |
+| Block      | 5.0 MiB  | 5.0 MiB  | 0       |
+
+##### FWD seq256 - Max Single Allocation
+
+| Category   | Baseline | Autocast | Δ (MiB) |
+| ---------- | -------- | -------- | ------- |
+| AttnScores | 32.0 MiB | 16.0 MiB | -16.0   |
+| AttnOut    | 32.0 MiB | 16.0 MiB | -16.0   |
+| Softmax    | 32.0 MiB | 32.0 MiB | 0       |
+| FFN        | 40.0 MiB | 20.0 MiB | -20.0   |
+| Norm       | 10.0 MiB | 10.0 MiB | 0       |
+| Embed      | 10.0 MiB | 10.0 MiB | 0       |
+| Attn       | 10.0 MiB | 5.0 MiB  | -5.0    |
+| einsum     | 40.0 MiB | 50.0 MiB | +10.0   |
+| Block      | 10.0 MiB | 10.0 MiB | 0       |
+
+##### FWD seq512 - Max Single Allocation
+
+| Category   | Baseline  | Autocast  | Δ (MiB) |
+| ---------- | --------- | --------- | ------- |
+| AttnScores | 128.0 MiB | 64.0 MiB  | -64.0   |
+| AttnOut    | 128.0 MiB | 64.0 MiB  | -64.0   |
+| Softmax    | 128.0 MiB | 128.0 MiB | 0       |
+| FFN        | 80.0 MiB  | 40.0 MiB  | -40.0   |
+| Norm       | 20.0 MiB  | 20.0 MiB  | 0       |
+| Embed      | 20.0 MiB  | 20.0 MiB  | 0       |
+| Attn       | 20.0 MiB  | 10.0 MiB  | -10.0   |
+| einsum     | 128.0 MiB | 64.0 MiB  | -64.0   |
+| Block      | 20.0 MiB  | 20.0 MiB  | 0       |
+
+##### FWD_BWD seq128 - Max Single Allocation
+
+| Category   | Baseline  | Autocast  | Δ (MiB) |
+| ---------- | --------- | --------- | ------- |
+| Gradient   | 100.0 MiB | 100.0 MiB | 0       |
+| Opt State  | 100.0 MiB | 100.0 MiB | 0       |
+| AttnScores | 8.0 MiB   | 4.0 MiB   | -4.0    |
+| AttnOut    | 8.0 MiB   | 4.0 MiB   | -4.0    |
+| Softmax    | 8.0 MiB   | 8.0 MiB   | 0       |
+| FFN        | 20.0 MiB  | 10.0 MiB  | -10.0   |
+| Norm       | 5.0 MiB   | 5.0 MiB   | 0       |
+| Embed      | 5.0 MiB   | 5.0 MiB   | 0       |
+| Attn       | 5.0 MiB   | 2.5 MiB   | -2.5    |
+| einsum     | 20.0 MiB  | 50.0 MiB  | +30.0   |
+| Block      | 5.0 MiB   | 5.0 MiB   | 0       |
+
+##### FWD_BWD seq256 - Max Single Allocation
+
+| Category   | Baseline  | Autocast  | Δ (MiB) |
+| ---------- | --------- | --------- | ------- |
+| Gradient   | 100.0 MiB | 100.0 MiB | 0       |
+| Opt State  | 100.0 MiB | 100.0 MiB | 0       |
+| AttnScores | 32.0 MiB  | 16.0 MiB  | -16.0   |
+| AttnOut    | 32.0 MiB  | 16.0 MiB  | -16.0   |
+| Softmax    | 32.0 MiB  | 32.0 MiB  | 0       |
+| FFN        | 40.0 MiB  | 20.0 MiB  | -20.0   |
+| Norm       | 10.0 MiB  | 10.0 MiB  | 0       |
+| Embed      | 10.0 MiB  | 10.0 MiB  | 0       |
+| Attn       | 10.0 MiB  | 5.0 MiB   | -5.0    |
+| einsum     | 40.0 MiB  | 50.0 MiB  | +10.0   |
+| Block      | 10.0 MiB  | 10.0 MiB  | 0       |
+
+##### Top 10 Allocations: baseline FWD_BWD seq256
+
+| #   | Size      | Category | Operation      | Call Chain |
+| --- | --------- | -------- | -------------- | ---------- |
+| 1   | 100.0 MiB | Other    | unknown        | Internal   |
+| 2   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+| 3   | 100.0 MiB | Other    | unknown        | Internal   |
+| 4   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+| 5   | 100.0 MiB | Other    | unknown        | Internal   |
+| 6   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+| 7   | 100.0 MiB | Other    | unknown        | Internal   |
+| 8   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+| 9   | 100.0 MiB | Other    | unknown        | Internal   |
+| 10  | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+
+##### Key Findings
+
+1. **Attention scores scale quadratically**: The Q·K^T computation
+   (AttnScores) creates large activation allocations that scale with O(seq^2):
+   - seq128: 8 MiB baseline (batch x heads x 128 x 128 x 4 bytes)
+   - seq256: 32 MiB baseline (4x increase for 2x seq)
+   - seq512: 128 MiB baseline (4x increase for 2x seq)
+
+2. **Gradient and optimizer state are fixed-size**: The largest single
+   allocations (~100 MiB each) come from:
+   - Gradient accumulation (AccumulateGrad) for embedding/projection layers
+   - Optimizer state initialization (zeros_like) for Adam's m and v buffers
+   - These scale with model parameters, not sequence length
+
+3. **FFN allocations scale linearly**: Feed-forward network activations
+   scale with O(batch x seq x d_ff):
+   - seq128: 20 MiB, seq256: 40 MiB, seq512: 80 MiB
+
+4. **Autocast reduces most activation sizes by ~50%**: With bf16:
+   - AttnScores, AttnOut, FFN, Attn all halve in size
+   - Softmax, Norm, Embed, Block unchanged (forced fp32 or unaffected)
+
+5. **einsum increases under autocast**: The einsum category shows +30 MiB
+   increase at seq128, likely due to dtype conversion buffers created
+   during bf16<->fp32 casts in the custom einsum implementations.
+
+6. **Softmax stays fp32**: Custom softmax implementation forces fp32 for
+   numerical stability, so its allocation size doesn't change with autocast.
