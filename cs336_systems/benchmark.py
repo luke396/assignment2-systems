@@ -171,11 +171,9 @@ def _forward_pass(
 def _backward_pass(ctx: StepContext, loss: torch.Tensor) -> None:
     """Execute backward pass and optimizer step."""
     assert ctx.optimizer is not None
-
     with ctx.nvtx_range("backward"):
         ctx.optimizer.zero_grad()
         loss.backward()
-
     with ctx.nvtx_range("optimizer_step"):
         ctx.optimizer.step()
 
@@ -195,9 +193,10 @@ def _run_single_step(ctx: StepContext, step: int) -> None:
         if ctx.run_inputs.autocast
         else nullcontext()
     )
+    # should only autocast forward and loss computation,
+    # same type in backward will be used automatically
     with autocast_ctx:
         _, loss = _forward_pass(ctx, data)
-
     if loss is not None:
         _backward_pass(ctx, loss)
 

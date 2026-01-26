@@ -14,11 +14,10 @@ def format_table(title: str, headers: list[str], rows: list[list[str]]) -> str:
 
     """
     if not rows:
-        return f"\n{title}\n\nNo data available.\n"
+        return f"{title}\n\nNo data available."
 
-    lines = [f"{title}\n"]
+    lines = [title, ""]
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
     lines.extend("| " + " | ".join(row) + " |" for row in rows)
-    lines.append("")  # Empty line after table
     return "\n".join(lines)
