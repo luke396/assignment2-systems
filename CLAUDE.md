@@ -1,5 +1,42 @@
 # Project Guidelines
 
+## Project Overview
+
+**CS336 Spring 2025 Assignment 2: Systems** - A course assignment focused on GPU performance analysis, optimization, and distributed training for Transformer language models.
+
+### Learning Objectives
+
+- GPU memory profiling and optimization
+- Mixed-precision training (FP16/BF16)
+- CUDA kernel analysis with Nsight Systems
+- Performance benchmarking
+
+### Project Context
+
+This is a **course assignment project** focused on learning:
+
+- The primary goal is educational exploration and understanding.
+- Test coverage is intentionally incomplete and **should not be added by students**.
+- Focus on benchmarking, profiling, and performance analysis rather than production-ready code.
+
+## Project Structure
+
+```
+.
+├── cs336_systems/          # Main module (benchmark, profiling code)
+│   ├── benchmark.py        # Benchmark runner with profiling modes
+│   ├── configs.py          # Model configurations
+│   └── nvtx_model.py       # NVTX-annotated model wrapper
+├── cs336-basics/           # Assignment 1 implementation (git submodule)
+├── scripts/                # Analysis and automation scripts
+│   ├── run_benchmarks.py   # Benchmark orchestration
+│   ├── analyze_*.py        # Result analysis scripts
+│   └── generate_docs.py    # Documentation generator
+├── docs/                   # Documentation system (see below)
+├── output/                 # Benchmark results and profiling data
+└── tests/                  # Test files (provided by course)
+```
+
 ## Environment
 
 - Use `uv` for environment management.
