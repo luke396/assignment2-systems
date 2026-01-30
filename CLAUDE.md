@@ -40,7 +40,7 @@ This is a **course assignment project** focused on learning:
 ## Environment
 
 - Use `uv` for environment management.
-- Unless otherwise specified, assume code runs on a single 32GB RTX 5090 GPU server.
+- Unless otherwise specified, assume code runs on a single A800-80G GPU server.
 - Default assumption: the local machine does not have the full dataset or a comparable high-VRAM GPU.
 
 ## Code Quality
@@ -97,12 +97,12 @@ docs/
 
 ### Analysis Scripts (`scripts/`)
 
-| Script | Input | Output |
-|--------|-------|--------|
-| `analyze_basic_benchmarks.py` | `benchmark_results__{tag}.md` | `benchmarking.md` |
-| `analyze_nsys_profile.py` | `*.nsys-rep` | `nsys-profile.md` |
-| `analyze_mixed_precision.py` | `*.nsys-rep` | `mixed-precision.md` |
-| `analyze_memory_snapshot.py` | `*.snap` | `memory-profile-*.md` |
+| Script                        | Input                         | Output                |
+| ----------------------------- | ----------------------------- | --------------------- |
+| `analyze_basic_benchmarks.py` | `benchmark_results__{tag}.md` | `benchmarking.md`     |
+| `analyze_nsys_profile.py`     | `*.nsys-rep`                  | `nsys-profile.md`     |
+| `analyze_mixed_precision.py`  | `*.nsys-rep`                  | `mixed-precision.md`  |
+| `analyze_memory_snapshot.py`  | `*.snap`                      | `memory-profile-*.md` |
 
 ### Usage
 
