@@ -5,7 +5,7 @@ import statistics
 import timeit
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from cs336_basics import blocks
@@ -35,6 +35,7 @@ class Config:
     python_time: bool = False
     memory_profile: bool = False
     memory_output: str = "output/memory_snapshot.snap"
+    jit: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class StepContext:
     run_inputs: RunInputs
     optimizer: torch.optim.Optimizer | None
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+    memory_before_backward: list[float] = field(default_factory=list)
 
     @property
     def is_training(self) -> bool:
@@ -111,6 +113,11 @@ def parse_cli_args() -> Config:
         type=str,
         default=defaults.memory_output,
         help="Output filename for memory snapshot.",
+    )
+    parser.add_argument(
+        "--jit",
+        action="store_true",
+        help="Enable torch.compile JIT compilation.",
     )
     return Config(**vars(parser.parse_args()))
 
@@ -197,6 +204,8 @@ def _run_single_step(ctx: StepContext, step: int) -> None:
     with autocast_ctx:
         _, loss = _forward_pass(ctx, data)
     if loss is not None:
+        if ctx.is_cuda:
+            ctx.memory_before_backward.append(torch.cuda.memory_allocated())
         _backward_pass(ctx, loss)
 
     if ctx.is_cuda and ctx.run_inputs.python_time:
@@ -269,6 +278,10 @@ def run_benchmark() -> None:
         n_layers=args.n_layers,
     ).to(device)
 
+    if args.jit:
+        torch._dynamo.reset()  # noqa: SLF001
+        model = torch.compile(model)  # type: ignore[assignment]
+
     optimizer, loss_fn = _setup_training(
         model,
         forward_only=args.forward_only,
@@ -314,6 +327,10 @@ def run_benchmark() -> None:
         print(f"Warm-up time ({args.warm_up_steps} steps): {warm_up_time:.4f} seconds")
         print(f"Avg time per step after warm-up: {avg_time:.4f} seconds")
         print(f"Std time per step after warm-up: {std_time:.6f} seconds")
+        if ctx.memory_before_backward:
+            mem_list = ctx.memory_before_backward
+            avg_mem = statistics.mean(mem_list) / (1024**3)
+            print(f"Avg memory before backward: {avg_mem:.2f} GB")
     elif args.memory_profile:
         print("Running in memory profiling mode (NVTX disabled)")
         print("Benchmark completed successfully")

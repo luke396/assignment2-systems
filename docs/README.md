@@ -686,3 +686,27 @@ Softmax backward formula: `∂L/∂x_i = y_i × (∂L/∂y_i - Σ_j y_j × ∂L/
 Standard attention has **O(n²) time complexity** (computing n×n dot products) and **O(n²) memory complexity** (storing attention matrix). The custom implementation is computationally correct but stores unnecessary tensors for backward.
 
 FlashAttention maintains O(n²) time complexity but reduces **memory complexity to O(n)** through two key techniques: **(1) tiling** — computing attention in small blocks that fit in fast SRAM without storing the full matrix, and **(2) recomputation** — recalculating attention weights during backward instead of storing them. This also improves speed by reducing slow HBM memory access.
+
+### End-to-End JIT vs Eager Comparison Results
+
+#### JIT vs Eager: xl
+
+| Seq Len | Mode  | Avg Time (s) | Mem (GB) |
+| ------- | ----- | ------------ | -------- |
+| 128     | Eager | 0.5456       | 34.26    |
+| 128     | JIT   | 0.5079       | 32.50    |
+| 256     | Eager | 0.9759       | 41.71    |
+| 256     | JIT   | 0.9120       | 37.49    |
+| 512     | Eager | 1.8508       | 60.34    |
+| 512     | JIT   | 1.6537       | 49.86    |
+| 1024    | Eager | N/A          | N/A      |
+| 1024    | JIT   | N/A          | N/A      |
+
+#### JIT vs Eager: 2.7B
+
+| Seq Len | Mode  | Avg Time (s) | Mem (GB) |
+| ------- | ----- | ------------ | -------- |
+| 128     | Eager | 0.8397       | 53.87    |
+| 128     | JIT   | 0.8099       | 52.16    |
+| 256     | Eager | 1.4698       | 60.86    |
+| 256     | JIT   | 1.4043       | 56.75    |
