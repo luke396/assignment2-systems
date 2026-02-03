@@ -42,6 +42,7 @@ cs336-basics = { path = "./cs336-basics", editable = true } # Change this path t
 log_cli = true
 log_cli_level = "WARNING"
 addopts = "-s"
+norecursedirs = ["cs336-basics"]
 
 [tool.ruff]
 line-length = 88
