@@ -113,11 +113,10 @@ def _benchmark_attention_impl(
         device=device,
     )  # shape: (bat, seq, d_model)
 
-    model = MultiheadSelfAttention(
+    module = MultiheadSelfAttention(
         d_model=embed_dim, num_heads=num_heads, rope=None, device=device
     )
-    if jit:
-        model = torch.compile(model)
+    model = torch.compile(module) if jit else module
     iters = 100
     warmup_iters = 10
 
@@ -126,7 +125,7 @@ def _benchmark_attention_impl(
         if not forward_only:
             loss = output.sum()
             loss.backward()
-            model.zero_grad()
+            module.zero_grad(set_to_none=True)
     torch.cuda.synchronize()
 
     # using cuda events timing on GPU
@@ -154,7 +153,7 @@ def _benchmark_attention_impl(
             loss = output.sum()
             loss.backward()
             bwd_end.record()
-            model.zero_grad()
+            module.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
             bwd_time.append(bwd_start.elapsed_time(bwd_end))
     # Compute statistics once
