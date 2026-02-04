@@ -69,7 +69,25 @@ class AttentionTorch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
-        raise NotImplementedError
+        l, Q, K, V, o = ctx.saved_tensors  # noqa: E741
+        return _backward_impl(l, Q, K, V, o, grad_outputs)
+
+
+@torch.compile
+def _backward_impl(l, Q, K, V, o, grad_outputs):  # noqa: E741
+    """Flash Attention backward pass."""
+    do = grad_outputs[0]  # (..., seq_len, d)
+    scale = 1 / math.sqrt(Q.size(-1))
+    d = torch.sum(o * do, dim=-1)  # (..., seq_len)
+
+    s = Q @ K.transpose(-2, -1) * scale  # (..., seq_len, seq_len)
+    p = torch.exp(s - l[..., :, None])  # (..., seq_len, seq_len)
+    dv = p.transpose(-2, -1) @ do  # (..., seq_len, d)
+    dp = do @ V.transpose(-2, -1)  # (..., seq_len, seq_len)
+    ds = p * (dp - d[..., :, None])  # (..., seq_len, seq_len)
+    dq = ds @ K * scale  # (..., seq_len, d)
+    dk = ds.transpose(-2, -1) @ Q * scale  # (..., seq_len, d)
+    return dq, dk, dv, None  # we need return grad for every forward's input
 
 
 @triton.jit
