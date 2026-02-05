@@ -61,6 +61,11 @@ def test_flash_forward_pass_pytorch():
     _test_flash_forward_pass(get_flashattention_autograd_function_pytorch().apply)
 
 
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_flash_forward_pass_pytorch_causal(is_causal):
+    _test_flash_forward_pass(get_flashattention_autograd_function_pytorch().apply, is_causal=is_causal)
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="A GPU must be available to run Triton kernels",
@@ -82,6 +87,18 @@ def test_flash_backward_pytorch():
 
     q, k, v, do = _make_attn_inputs()
     get_flashattention_autograd_function_pytorch().apply(q, k, v, False).backward(do)
+
+    torch.testing.assert_close(dq_expected, q.grad, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dk_expected, k.grad, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dv_expected, v.grad, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_flash_backward_pytorch_causal(is_causal):
+    dq_expected, dk_expected, dv_expected = flash_backward_results(lambda *args: _attention_and_lse(*args)[0], is_causal)
+
+    q, k, v, do = _make_attn_inputs()
+    get_flashattention_autograd_function_pytorch().apply(q, k, v, is_causal).backward(do)
 
     torch.testing.assert_close(dq_expected, q.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dk_expected, k.grad, rtol=1e-2, atol=1e-2)

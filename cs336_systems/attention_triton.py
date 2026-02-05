@@ -21,8 +21,6 @@ class AttentionTorch(torch.autograd.Function):
         K : (... , seq_len, d)
         V : (... , seq_len, d)
         """
-        _ = is_causal  # causal masking not implemented for PyTorch version
-
         seq, d = Q.size(-2), Q.size(-1)
         scale = 1 / math.sqrt(d)
         num_q_tiles = math.ceil(seq / q_tile_size)
@@ -41,12 +39,28 @@ class AttentionTorch(torch.autograd.Function):
             # online max
             m_i = tile_q.new_full(tile_q.shape[:-1], float("-inf"))  # (b_q,)
 
-            for j in range(num_kv_tiles):
+            # For causal, only iterate up to the KV tiles that overlap with Q tile
+            max_kv_tiles = (
+                math.ceil((i + 1) * q_tile_size / kv_tile_size)
+                if is_causal
+                else num_kv_tiles
+            )
+            for j in range(max_kv_tiles):
                 kv_start, kv_end = j * kv_tile_size, (j + 1) * kv_tile_size
                 tile_k = K[..., kv_start:kv_end, :]  # (b_k, d)
                 tile_v = V[..., kv_start:kv_end, :]  # (b_k, d)
 
                 s_ij = tile_q @ tile_k.transpose(-2, -1) * scale  # (b_q, b_k)
+
+                # Apply causal mask: mask out positions where k > q
+                if is_causal:
+                    q_indices = torch.arange(q_start, q_end, device=Q.device)  # (b_q,)
+                    k_indices = torch.arange(
+                        kv_start, kv_end, device=Q.device
+                    )  # (b_k,)
+                    # q_indices[:, None] >= k_indices[None, :] -> (b_q, b_k)
+                    causal_mask = q_indices[:, None] < k_indices[None, :]
+                    s_ij = s_ij.masked_fill(causal_mask, float("-inf"))
                 m_i_prev = m_i
                 m_i = torch.maximum(m_i_prev, s_ij.max(dim=-1).values)  # (b_q,)
                 # minus max to improve numerical stability
@@ -64,30 +78,41 @@ class AttentionTorch(torch.autograd.Function):
             l[..., q_start:q_end] = l_i
 
         ctx.save_for_backward(l, Q, K, V, o)
+        ctx.is_causal = is_causal
 
         return o
 
     @staticmethod
     def backward(ctx, *grad_outputs):
         l, Q, K, V, o = ctx.saved_tensors  # noqa: E741
-        return _backward_impl(l, Q, K, V, o, grad_outputs)
+        is_causal = ctx.is_causal
+        return _backward_impl(l, Q, K, V, o, grad_outputs, is_causal)
 
 
 @torch.compile
-def _backward_impl(l, Q, K, V, o, grad_outputs):  # noqa: E741
+def _backward_impl(l, Q, K, V, o, grad_outputs, is_causal):  # noqa: E741
     """Flash Attention backward pass."""
     do = grad_outputs[0]  # (..., seq_len, d)
     scale = 1 / math.sqrt(Q.size(-1))
     d = torch.sum(o * do, dim=-1)  # (..., seq_len)
 
     s = Q @ K.transpose(-2, -1) * scale  # (..., seq_len, seq_len)
+
+    # Apply causal mask
+    if is_causal:
+        seq_len = Q.size(-2)
+        q_indices = torch.arange(seq_len, device=Q.device)
+        k_indices = torch.arange(seq_len, device=Q.device)
+        causal_mask = q_indices[:, None] < k_indices[None, :]
+        s = s.masked_fill(causal_mask, float("-inf"))
+
     p = torch.exp(s - l[..., :, None])  # (..., seq_len, seq_len)
     dv = p.transpose(-2, -1) @ do  # (..., seq_len, d)
     dp = do @ V.transpose(-2, -1)  # (..., seq_len, seq_len)
     ds = p * (dp - d[..., :, None])  # (..., seq_len, seq_len)
     dq = ds @ K * scale  # (..., seq_len, d)
     dk = ds.transpose(-2, -1) @ Q * scale  # (..., seq_len, d)
-    return dq, dk, dv, None  # we need return grad for every forward's input
+    return dq, dk, dv, None, None, None  # grad for every forward input
 
 
 @triton.jit
