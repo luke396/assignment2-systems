@@ -5,6 +5,73 @@ import triton
 import triton.language as tl
 
 
+def attention_regular(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    is_causal: bool = False,  # noqa: FBT001, FBT002
+) -> torch.Tensor:
+    """Standard (naive) attention: O(n^2) memory, no tiling."""
+    scale = 1 / math.sqrt(Q.size(-1))
+    s = Q @ K.transpose(-2, -1) * scale  # (..., seq, seq)
+    if is_causal:
+        seq_len = Q.size(-2)
+        q_idx = torch.arange(seq_len, device=Q.device)
+        k_idx = torch.arange(seq_len, device=Q.device)
+        s = s.masked_fill(q_idx[:, None] < k_idx[None, :], float("-inf"))
+    p = torch.softmax(s, dim=-1)
+    return p @ V
+
+
+@torch.compile
+def _forward_impl(Q, K, V, is_causal, q_tile_size, kv_tile_size):
+    seq, d = Q.size(-2), Q.size(-1)
+    scale = 1 / math.sqrt(d)
+    num_q_tiles = math.ceil(seq / q_tile_size)
+    num_kv_tiles = math.ceil(seq / kv_tile_size)
+
+    o = Q.new_zeros(Q.size())  # (seq_len, d)
+    l = Q.new_zeros(Q.shape[:-1])  # (seq_len)  # noqa: E741
+
+    for i in range(num_q_tiles):
+        q_start, q_end = i * q_tile_size, (i + 1) * q_tile_size
+        tile_q = Q[..., q_start:q_end, :]  # (b_q, d)
+        o_i = tile_q.new_zeros(tile_q.size())  # (b_q, d)
+        l_i = tile_q.new_zeros(tile_q.shape[:-1])  # (b_q,)
+        m_i = tile_q.new_full(tile_q.shape[:-1], float("-inf"))  # (b_q,)
+
+        max_kv_tiles = (
+            math.ceil((i + 1) * q_tile_size / kv_tile_size)
+            if is_causal
+            else num_kv_tiles
+        )
+        for j in range(max_kv_tiles):
+            kv_start = j * kv_tile_size
+            kv_end = (j + 1) * kv_tile_size
+            tile_k = K[..., kv_start:kv_end, :]  # (b_k, d)
+            tile_v = V[..., kv_start:kv_end, :]  # (b_k, d)
+
+            s_ij = tile_q @ tile_k.transpose(-2, -1) * scale
+
+            if is_causal:
+                q_indices = torch.arange(q_start, q_end, device=Q.device)
+                k_indices = torch.arange(kv_start, kv_end, device=Q.device)
+                causal_mask = q_indices[:, None] < k_indices[None, :]
+                s_ij = s_ij.masked_fill(causal_mask, float("-inf"))
+            m_i_prev = m_i
+            m_i = torch.maximum(m_i_prev, s_ij.max(dim=-1).values)
+            p_ij = torch.exp(s_ij - m_i[..., None])
+            alpha = torch.exp(m_i_prev - m_i)
+            l_i = alpha * l_i + p_ij.sum(dim=-1)
+            o_i = alpha[..., None] * o_i + p_ij @ tile_v
+        o_i = o_i / l_i[..., None]
+        l_i = m_i + torch.log(l_i)
+        o[..., q_start:q_end, :] = o_i
+        l[..., q_start:q_end] = l_i
+
+    return o, l
+
+
 class AttentionTorch(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -21,61 +88,14 @@ class AttentionTorch(torch.autograd.Function):
         K : (... , seq_len, d)
         V : (... , seq_len, d)
         """
-        seq, d = Q.size(-2), Q.size(-1)
-        scale = 1 / math.sqrt(d)
-        num_q_tiles = math.ceil(seq / q_tile_size)
-        num_kv_tiles = math.ceil(seq / kv_tile_size)
-
-        o = Q.new_zeros(Q.size())  # (seq_len, d)
-        l = Q.new_zeros(Q.shape[:-1])  # (seq_len)  # noqa: E741
-
-        for i in range(num_q_tiles):
-            q_start, q_end = i * q_tile_size, (i + 1) * q_tile_size
-            tile_q = Q[..., q_start:q_end, :]  # (b_q, d)
-            # unnormalized output
-            o_i = tile_q.new_zeros(tile_q.size())  # (b_q, d)
-            # normalization factor
-            l_i = tile_q.new_zeros(tile_q.shape[:-1])  # (b_q,)
-            # online max
-            m_i = tile_q.new_full(tile_q.shape[:-1], float("-inf"))  # (b_q,)
-
-            # For causal, only iterate up to the KV tiles that overlap with Q tile
-            max_kv_tiles = (
-                math.ceil((i + 1) * q_tile_size / kv_tile_size)
-                if is_causal
-                else num_kv_tiles
-            )
-            for j in range(max_kv_tiles):
-                kv_start, kv_end = j * kv_tile_size, (j + 1) * kv_tile_size
-                tile_k = K[..., kv_start:kv_end, :]  # (b_k, d)
-                tile_v = V[..., kv_start:kv_end, :]  # (b_k, d)
-
-                s_ij = tile_q @ tile_k.transpose(-2, -1) * scale  # (b_q, b_k)
-
-                # Apply causal mask: mask out positions where k > q
-                if is_causal:
-                    q_indices = torch.arange(q_start, q_end, device=Q.device)  # (b_q,)
-                    k_indices = torch.arange(
-                        kv_start, kv_end, device=Q.device
-                    )  # (b_k,)
-                    # q_indices[:, None] >= k_indices[None, :] -> (b_q, b_k)
-                    causal_mask = q_indices[:, None] < k_indices[None, :]
-                    s_ij = s_ij.masked_fill(causal_mask, float("-inf"))
-                m_i_prev = m_i
-                m_i = torch.maximum(m_i_prev, s_ij.max(dim=-1).values)  # (b_q,)
-                # minus max to improve numerical stability
-                p_ij = torch.exp(s_ij - m_i[..., None])  # (b_q, b_k)
-                # update normalization factor and output
-                alpha = torch.exp(m_i_prev - m_i)
-                l_i = alpha * l_i + p_ij.sum(dim=-1)  # (b_q,)
-                # update unnormalized output
-                o_i = alpha[..., None] * o_i + p_ij @ tile_v  # (b_q, d)
-            # finalize normalize output
-            o_i = o_i / l_i[..., None]  # (b_q, d)
-            # log sum exp - lse for backward
-            l_i = m_i + torch.log(l_i)  # (b_q,)
-            o[..., q_start:q_end, :] = o_i
-            l[..., q_start:q_end] = l_i
+        o, l = _forward_impl(  # noqa: E741
+            Q,
+            K,
+            V,
+            is_causal,
+            q_tile_size,
+            kv_tile_size,
+        )
 
         ctx.save_for_backward(l, Q, K, V, o)
         ctx.is_causal = is_causal
@@ -230,7 +250,7 @@ def flash_fwd_kernel(
 
     o_i = o_i / l_i[:, None]  # (b_q, d)
     l_i = m_i + tl.log(l_i)  # (b_q,)
-    tl.store(O_block_ptr, o_i.to(O_block_ptr.type.element_ty))
+    tl.store(O_block_ptr, o_i.to(tile_q.dtype))
     tl.store(L_block_ptr, l_i)
 
 
@@ -255,7 +275,7 @@ class AttentionTriton(torch.autograd.Function):
         n_q_tiles = math.ceil(seq / q_tile_size)
 
         o = Q.new_zeros(Q.size())  # (seq_len, d)
-        l = Q.new_zeros(Q.shape[:-1])  # (seq_len)  # noqa: E741
+        l = torch.zeros(Q.shape[:-1], dtype=torch.float32, device=Q.device)  # noqa: E741
 
         ctx.Q_TILE_SIZE = q_tile_size
         ctx.K_TILE_SIZE = kv_tile_size
@@ -464,7 +484,7 @@ def flash_bwd_preprocess(
     tile_o = tl.load(O_block_ptr)  # (b_q, d)
     tile_do = tl.load(dO_block_ptr)  # (b_q, d)
 
-    d_i = tl.sum(tile_o * tile_do, axis=1)  # (b_q,)
+    d_i = tl.sum(tile_o.to(tl.float32) * tile_do.to(tl.float32), axis=1)
 
     tl.store(D_block_ptr, d_i)
 
@@ -600,15 +620,15 @@ def flash_dkdv_kerel(
         tile_dv += tl.dot(tl.trans(p_ij.to(tile_do.dtype)), tile_do)  # (b_k, d)
         dp_ij = tl.dot(tile_do, tl.trans(tile_v))  # (b_q, b_k)
         ds_ij = p_ij * (dp_ij - tile_d[:, None]) * scale  # (b_q, b_k)
-        tile_dk += tl.dot(tl.trans(ds_ij), tile_q)  # (b_k, d)
+        tile_dk += tl.dot(tl.trans(ds_ij.to(tile_q.dtype)), tile_q)  # (b_k, d)
 
         Q_block_ptr = Q_block_ptr.advance((Q_TILE_SIZE, 0))
         L_block_ptr = L_block_ptr.advance((Q_TILE_SIZE,))
         dO_block_ptr = dO_block_ptr.advance((Q_TILE_SIZE, 0))
         D_block_ptr = D_block_ptr.advance((Q_TILE_SIZE,))
 
-    tl.store(dK_block_ptr, tile_dk.to(dK_block_ptr.type.element_ty))
-    tl.store(dV_block_ptr, tile_dv.to(dV_block_ptr.type.element_ty))
+    tl.store(dK_block_ptr, tile_dk.to(tile_k.dtype))
+    tl.store(dV_block_ptr, tile_dv.to(tile_k.dtype))
 
 
 @triton.jit
@@ -734,9 +754,9 @@ def flash_dq_kerel(
         dp_ij = tl.dot(tile_do, tl.trans(tile_v))  # (b_q, b_k)
         ds_ij = p_ij * (dp_ij - tile_d[:, None]) * scale  # (b_q, b_k)
 
-        tile_dq += tl.dot(ds_ij, tile_k)  # (b_q, d)
+        tile_dq += tl.dot(ds_ij.to(tile_k.dtype), tile_k)  # (b_q, d)
 
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
         V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
 
-    tl.store(dQ_block_ptr, tile_dq.to(dQ_block_ptr.type.element_ty))
+    tl.store(dQ_block_ptr, tile_dq.to(tile_q.dtype))
