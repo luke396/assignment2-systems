@@ -13,6 +13,8 @@ SEQ_E_LEN = [256, 1024, 4096, 8192, 16384]
 VOCAB_SIZE = 10000
 SEED = 42
 
+torch.set_float32_matmul_precision("high")
+
 
 @dataclass
 class TimingStats:
@@ -72,11 +74,14 @@ def benchmark_attention(
     num_heads: int = 1,
     *,
     forward_only: bool = True,
+    jit: bool = False,
 ) -> dict:
     """Benchmark Multihead Self-Attention module."""
+    if jit:
+        torch._dynamo.reset()  # noqa: SLF001 # Reset compile cache to avoid recompile_limit
     try:
         return _benchmark_attention_impl(
-            seq_len, embed_dim, device, num_heads, forward_only=forward_only
+            seq_len, embed_dim, device, num_heads, forward_only=forward_only, jit=jit
         )
     except torch.cuda.OutOfMemoryError:
         oom_info = _get_oom_info()
@@ -99,6 +104,7 @@ def _benchmark_attention_impl(
     num_heads: int = 1,
     *,
     forward_only: bool = True,
+    jit: bool = False,
 ) -> dict:
     """Run the benchmark implementation."""
     data = generate_random_data(
@@ -107,9 +113,10 @@ def _benchmark_attention_impl(
         device=device,
     )  # shape: (bat, seq, d_model)
 
-    model = MultiheadSelfAttention(
+    module = MultiheadSelfAttention(
         d_model=embed_dim, num_heads=num_heads, rope=None, device=device
     )
+    model = torch.compile(module) if jit else module
     iters = 100
     warmup_iters = 10
 
@@ -118,7 +125,7 @@ def _benchmark_attention_impl(
         if not forward_only:
             loss = output.sum()
             loss.backward()
-            model.zero_grad()
+            module.zero_grad(set_to_none=True)
     torch.cuda.synchronize()
 
     # using cuda events timing on GPU
@@ -146,7 +153,7 @@ def _benchmark_attention_impl(
             loss = output.sum()
             loss.backward()
             bwd_end.record()
-            model.zero_grad()
+            module.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
             bwd_time.append(bwd_start.elapsed_time(bwd_end))
     # Compute statistics once
@@ -195,6 +202,7 @@ def _benchmark_attention_impl(
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results = []
+    jit = True
     for seq_len in SEQ_E_LEN:
         for embed_dim in HEAD_EMBD_DIM:
             result_fwd = benchmark_attention(
@@ -202,6 +210,7 @@ if __name__ == "__main__":
                 embed_dim=embed_dim,
                 device=device,
                 forward_only=True,
+                jit=jit,
             )
             results.append(result_fwd)
             result_bwd = benchmark_attention(
@@ -209,13 +218,18 @@ if __name__ == "__main__":
                 embed_dim=embed_dim,
                 device=device,
                 forward_only=False,
+                jit=jit,
             )
             results.append(result_bwd)
 
     # Save results to output directory
     output_dir = Path(__file__).parent.parent / "output"
     output_dir.mkdir(exist_ok=True)
-    output_file = output_dir / "benchmark_attention_results.json"
+    output_file = (
+        output_dir / "benchmark_attention_results.json"
+        if not jit
+        else output_dir / "benchmark_attention_results_jit.json"
+    )
     with output_file.open("w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {output_file}")

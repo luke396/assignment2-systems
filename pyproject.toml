@@ -42,6 +42,7 @@ cs336-basics = { path = "./cs336-basics", editable = true } # Change this path t
 log_cli = true
 log_cli_level = "WARNING"
 addopts = "-s"
+norecursedirs = ["cs336-basics"]
 
 [tool.ruff]
 line-length = 88
@@ -50,6 +51,8 @@ extend-exclude = ["tests"]
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
+# Triton kernel files: ignore type annotations (unsupported by JIT), docstrings, uppercase naming (GPU convention)
+"*_triton.py" = ["ANN", "D", "N803", "N806"]
 
 [tool.ruff.lint]
 select = ["ALL"]
