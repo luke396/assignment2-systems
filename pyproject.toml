@@ -63,3 +63,7 @@ ignore = ["F722", "D203", "D213", "S101", "COM812", "T201", "S603", "S607", "PLR
 # To type-check cs336-basics, run: uv run ty check --project ./cs336-basics
 # ty doesn't merge configurations from subdirectories (see https://github.com/astral-sh/ty/issues/819)
 exclude = ["tests/*", "cs336-basics/**"]
+
+[tool.ty.rules]
+# torch.distributed conditionally exports attributes; always available in practice
+possibly-unbound-attribute = "ignore"
