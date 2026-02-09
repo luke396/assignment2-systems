@@ -1107,3 +1107,14 @@ NCCL+GPU is consistently 10–25x faster than Gloo+CPU across all configurations
 Both backends show roughly linear latency scaling with data size, confirming that all-reduce is bandwidth-bound for large messages. Increasing the process count raises latency moderately, with similar relative scaling across both backends—consistent with the ring all-reduce algorithm whose communication volume scales as `2·(N−1)/N · data_size`.
 
 One anomaly is the Gloo 1 GB case where 6 processes (1947 ms) is slightly faster than 4 processes (2252 ms), likely due to measurement variance at only 5 iterations.
+
+### Naive DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd+Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+| ------- | ------------ | -------------- | -------------- | ---------- | ------ |
+| 64      | 185.24       | 390.75         | 95.28          | 671.27     | 58.2%  |
+| 96      | 234.74       | 390.49         | 95.87          | 721.10     | 54.2%  |
+| 128     | 276.96       | 391.03         | 95.81          | 763.80     | 51.2%  |
+| 256     | 465.11       | 391.71         | 95.31          | 952.14     | 41.1%  |
+| 512     | 951.23       | 391.49         | 95.78          | 1438.50    | 27.2%  |
+| 1024    | 2009.92      | 393.18         | 95.58          | 2498.68    | 15.7%  |

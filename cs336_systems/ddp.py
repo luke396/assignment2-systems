@@ -1,11 +1,15 @@
 """Naive distributed data parallel training implementation."""
 
 import os
+import time
 from copy import deepcopy
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from cs336_basics.blocks import TransformerLM
+
+from cs336_systems.benchmark import generate_random_data
 
 
 def _setup(rank: int, world_size: int, backend: str = "gloo") -> None:
@@ -79,7 +83,7 @@ def _rank_parallel_train(
             for param_base, param_ddp in zip(
                 base_model.parameters(), ddp_model.parameters(), strict=True
             ):
-                # if not raise AssertionError, the two models are close enough after one step of training
+                # the two models are close enough after training
                 assert torch.allclose(param_base.data, param_ddp.data, atol=1e-6)
 
     dist.destroy_process_group()
@@ -97,5 +101,162 @@ def naive_ddp(batch_size: int = 32, n_procs: int = 8, backend: str = "gloo") -> 
     )
 
 
+def _ddp_xl(
+    rank: int,
+    world_size: int,
+    queue: mp.Queue,
+    seq_len: int = 64,
+    backend: str = "nccl",
+    d_model: int = 1600,
+    d_ff: int = 6400,
+    n_heads: int = 25,
+    n_layers: int = 48,
+) -> None:
+    _setup(rank, world_size, backend=backend)
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+
+    vocab_size = 10000
+    batch_size = 4
+    microbatch_size = batch_size // world_size
+    seed = 42
+    warmup_iters = 5
+    iters = 10
+
+    data = generate_random_data(
+        seq_len=seq_len,
+        vocab_size=vocab_size,
+        batch_size=batch_size,
+        seed=seed,
+        device=device,
+    )[rank * microbatch_size : (rank + 1) * microbatch_size]
+
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        num_heads=n_heads,
+        d_ff=d_ff,
+        context_length=seq_len,
+        n_layers=n_layers,
+        device=device,
+    )
+    for param in model.parameters():
+        dist.broadcast(param.data, src=0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    for _i in range(warmup_iters):
+        logits = model(data)
+        loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
+        loss.backward()
+        for param in model.parameters():
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        optimizer.step()
+        optimizer.zero_grad()
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    for i in range(iters):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+
+        logits = model(data)
+        loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
+        loss.backward()
+
+        torch.cuda.synchronize()
+        training_time = time.perf_counter()
+
+        for param in model.parameters():
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
+        torch.cuda.synchronize()
+        allreduce_time = time.perf_counter()
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+        torch.cuda.synchronize()
+        optimizer_time = time.perf_counter()
+        if rank == 0:
+            queue.put(
+                {
+                    "seq_len": seq_len,
+                    "iter": i,
+                    "training_time": training_time - start,
+                    "allreduce_time": allreduce_time - training_time,
+                    "optimizer_time": optimizer_time - allreduce_time,
+                }
+            )
+        torch.cuda.synchronize()
+        dist.barrier()
+    dist.destroy_process_group()
+
+
+def benchmark_ddp_xl(
+    n_procs: int = 2,
+    backend: str = "nccl",
+    seq_len: int = 64,
+) -> list[dict]:
+    """Benchmark DDP training on xl model."""
+    ctx = mp.get_context("spawn")
+    queue: mp.Queue = ctx.Queue()
+    mp.spawn(
+        _ddp_xl,
+        args=(n_procs, queue, seq_len, backend),
+        nprocs=n_procs,
+        join=True,
+    )
+    results = []
+    while not queue.empty():
+        results.append(queue.get())
+    results.sort(key=lambda x: x["iter"])
+    return results
+
+
+def _format_results(all_results: list[dict], n_procs: int) -> str:
+    """Format benchmark results as markdown table."""
+    seq_lens = sorted({r["seq_len"] for r in all_results})
+    rows = []
+    for sl in seq_lens:
+        group = [r for r in all_results if r["seq_len"] == sl]
+        n = len(group)
+        avg_t = sum(r["training_time"] for r in group) / n * 1000
+        avg_c = sum(r["allreduce_time"] for r in group) / n * 1000
+        avg_o = sum(r["optimizer_time"] for r in group) / n * 1000
+        avg_total = avg_t + avg_c + avg_o
+        pct = avg_c / avg_total * 100
+        rows.append(
+            f"| {sl} | {avg_t:.2f} | {avg_c:.2f} "
+            f"| {avg_o:.2f} | {avg_total:.2f} | {pct:.1f}% |"
+        )
+    table = "\n".join(rows)
+
+    return (
+        f"### Naive DDP Benchmark (XL, 1 Node x {n_procs} GPUs)\n\n"
+        "| Seq Len | Fwd+Bwd (ms) | AllReduce (ms) "
+        "| Optimizer (ms) | Total (ms) | Comm % |\n"
+        "|---------|-------------|----------------|"
+        "----------------|------------|--------|\n"
+        f"{table}\n"
+    )
+
+
 if __name__ == "__main__":
+    from pathlib import Path
+
     naive_ddp(batch_size=32, n_procs=8, backend="gloo")
+
+    n = 2
+    all_res: list[dict] = []
+    for seq in (64, 96, 128, 256, 512, 1024):
+        print(f"Benchmarking seq_len={seq}...")
+        res = benchmark_ddp_xl(n_procs=n, backend="nccl", seq_len=seq)
+        all_res.extend(res)
+
+    md = _format_results(all_res, n_procs=n)
+    print(md)
+    out = Path("docs/sections/ddp-xl.md")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md)
+    print(f"Saved: {out}")
