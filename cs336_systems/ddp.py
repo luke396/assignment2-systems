@@ -3,11 +3,13 @@
 import os
 import time
 from copy import deepcopy
+from functools import partial
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from cs336_basics.blocks import TransformerLM
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from cs336_systems.benchmark import generate_random_data
 
@@ -39,6 +41,8 @@ def _rank_parallel_train(
     backend: str,
     global_batchsize: int,
     iters: int,
+    *,
+    flat_grad: bool = False,
 ) -> None:
     if backend == "nccl":
         torch.cuda.set_device(rank)
@@ -73,9 +77,23 @@ def _rank_parallel_train(
 
         ddp_loss = ddp_model(micro_data).mean()
         ddp_loss.backward()
+
         # loss mean + all reduce mean equal to global batch size mean
-        for param in ddp_model.parameters():
-            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        if flat_grad:
+            flat = _flatten_dense_tensors([p.grad for p in ddp_model.parameters()])
+            dist.all_reduce(flat, op=dist.ReduceOp.AVG)
+            for p, g in zip(
+                ddp_model.parameters(),
+                _unflatten_dense_tensors(
+                    flat, [p.grad for p in ddp_model.parameters()]
+                ),
+                strict=True,
+            ):
+                p.grad = g
+        else:
+            for param in ddp_model.parameters():
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
         ddp_optimizer.step()
         ddp_optimizer.zero_grad()
 
@@ -107,6 +125,8 @@ def _ddp_xl(
     queue: mp.Queue,
     seq_len: int = 64,
     backend: str = "nccl",
+    *,
+    flat_grad: bool = False,
     d_model: int = 1600,
     d_ff: int = 6400,
     n_heads: int = 25,
@@ -145,12 +165,26 @@ def _ddp_xl(
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss()
 
+    def _sync_grads() -> None:
+        if flat_grad:
+            grads = [p.grad for p in model.parameters()]
+            flat = _flatten_dense_tensors(grads)
+            dist.all_reduce(flat, op=dist.ReduceOp.AVG)
+            for p, g in zip(
+                model.parameters(),
+                _unflatten_dense_tensors(flat, grads),
+                strict=True,
+            ):
+                p.grad = g
+        else:
+            for param in model.parameters():
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
     for _i in range(warmup_iters):
         logits = model(data)
         loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
         loss.backward()
-        for param in model.parameters():
-            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        _sync_grads()
         optimizer.step()
         optimizer.zero_grad()
     torch.cuda.synchronize()
@@ -167,8 +201,7 @@ def _ddp_xl(
         torch.cuda.synchronize()
         training_time = time.perf_counter()
 
-        for param in model.parameters():
-            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        _sync_grads()
 
         torch.cuda.synchronize()
         allreduce_time = time.perf_counter()
@@ -197,12 +230,14 @@ def benchmark_ddp_xl(
     n_procs: int = 2,
     backend: str = "nccl",
     seq_len: int = 64,
+    *,
+    flat_grad: bool = False,
 ) -> list[dict]:
     """Benchmark DDP training on xl model."""
     ctx = mp.get_context("spawn")
     queue: mp.Queue = ctx.Queue()
     mp.spawn(
-        _ddp_xl,
+        partial(_ddp_xl, flat_grad=flat_grad),
         args=(n_procs, queue, seq_len, backend),
         nprocs=n_procs,
         join=True,
@@ -214,7 +249,12 @@ def benchmark_ddp_xl(
     return results
 
 
-def _format_results(all_results: list[dict], n_procs: int) -> str:
+def _format_results(
+    all_results: list[dict],
+    n_procs: int,
+    label: str = "Naive",
+    oom_seq_lens: list[int] | None = None,
+) -> str:
     """Format benchmark results as markdown table."""
     seq_lens = sorted({r["seq_len"] for r in all_results})
     rows = []
@@ -230,10 +270,13 @@ def _format_results(all_results: list[dict], n_procs: int) -> str:
             f"| {sl} | {avg_t:.2f} | {avg_c:.2f} "
             f"| {avg_o:.2f} | {avg_total:.2f} | {pct:.1f}% |"
         )
+    rows.extend(
+        f"| {sl} | OOM | OOM | OOM | OOM | OOM |" for sl in sorted(oom_seq_lens or [])
+    )
     table = "\n".join(rows)
 
     return (
-        f"### Naive DDP Benchmark (XL, 1 Node x {n_procs} GPUs)\n\n"
+        f"### {label} DDP Benchmark (XL, 1 Node x {n_procs} GPUs)\n\n"
         "| Seq Len | Fwd+Bwd (ms) | AllReduce (ms) "
         "| Optimizer (ms) | Total (ms) | Comm % |\n"
         "|---------|-------------|----------------|"
@@ -248,15 +291,39 @@ if __name__ == "__main__":
     naive_ddp(batch_size=32, n_procs=8, backend="gloo")
 
     n = 2
-    all_res: list[dict] = []
-    for seq in (64, 96, 128, 256, 512, 1024):
-        print(f"Benchmarking seq_len={seq}...")
-        res = benchmark_ddp_xl(n_procs=n, backend="nccl", seq_len=seq)
-        all_res.extend(res)
+    seq_lens = (64, 96, 128, 256, 512, 1024)
+    out_dir = Path("docs/sections")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    md = _format_results(all_res, n_procs=n)
-    print(md)
-    out = Path("docs/sections/ddp-xl.md")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(md)
-    print(f"Saved: {out}")
+    modes: list[tuple[bool, str, str]] = [
+        (False, "Naive", "ddp-xl-naive.md"),
+        (True, "Flat-Grad-Naive", "ddp-xl-naive-flat-grad.md"),
+    ]
+
+    for use_flat, label, filename in modes:
+        all_res: list[dict] = []
+        oom_seqs: list[int] = []
+        for seq in seq_lens:
+            print(f"[{label}] Benchmarking seq_len={seq}...")
+            try:
+                res = benchmark_ddp_xl(
+                    n_procs=n, backend="nccl", seq_len=seq, flat_grad=use_flat
+                )
+            except Exception as e:
+                if "out of memory" in str(e).lower():
+                    print(f"[{label}] OOM at seq_len={seq}, skipping rest.")
+                    oom_seqs.extend(
+                        s for s in seq_lens if s >= seq and s not in oom_seqs
+                    )
+                    break
+                raise
+            all_res.extend(res)
+
+        if not all_res and not oom_seqs:
+            print(f"[{label}] No results collected, skipping output.")
+            continue
+        md = _format_results(all_res, n_procs=n, label=label, oom_seq_lens=oom_seqs)
+        print(md)
+        out = out_dir / filename
+        out.write_text(md)
+        print(f"Saved: {out}")
