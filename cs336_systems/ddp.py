@@ -285,6 +285,40 @@ def _format_results(
     )
 
 
+class DDP(torch.nn.Module):
+    """Distributed data parallel wrapper with overlapped gradient communication."""
+
+    def __init__(
+        self,
+        module: torch.nn.Module,
+    ) -> None:
+        """Broadcast params from rank 0 and register async all-reduce hooks."""
+        super().__init__()
+        self.module = module
+        self.handles: list[dist.Work] = []
+
+        for param in self.module.parameters():
+            dist.broadcast(param.data, src=0)
+            if param.requires_grad:
+                param.register_post_accumulate_grad_hook(self._grad_hook)
+
+    def _grad_hook(self, param: torch.Tensor) -> None:
+        # grad has filled for cur layer, call all-reduce instantly
+        handle = dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, async_op=True)
+        assert handle is not None
+        self.handles.append(handle)
+
+    def forward(self, *inputs: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the wrapped module."""
+        return self.module.forward(*inputs, **kwargs)
+
+    def finish_gradient_synchronization(self) -> None:
+        """Wait for all async all-reduce operations to complete."""
+        for h in self.handles:
+            h.wait()
+        self.handles.clear()
+
+
 if __name__ == "__main__":
     from pathlib import Path
 
