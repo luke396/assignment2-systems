@@ -1129,3 +1129,44 @@ One anomaly is the Gloo 1 GB case where 6 processes (1947 ms) is slightly faster
 | 256     | 463.04       | 383.11         | 96.05          | 942.21     | 40.7%  |
 | 512     | 941.73       | 386.86         | 96.03          | 1424.62    | 27.2%  |
 | 1024    | OOM          | OOM            | OOM            | OOM        | OOM    |
+
+### Overlapped DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd+Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+| ------- | ------------ | -------------- | -------------- | ---------- | ------ |
+| 64      | 816.75       | 2.92           | 99.24          | 918.91     | 0.3%   |
+| 96      | 821.29       | 3.27           | 100.01         | 924.57     | 0.4%   |
+| 128     | 832.46       | 2.81           | 99.17          | 934.44     | 0.3%   |
+| 256     | 930.09       | 3.33           | 99.54          | 1032.96    | 0.3%   |
+| 512     | 1187.05      | 2.91           | 99.94          | 1289.90    | 0.2%   |
+| 1024    | 2080.23      | 2.73           | 98.96          | 2181.92    | 0.1%   |
+
+### DDP Nsight Systems Profiling (Naive vs Overlapped)
+
+Below are Nsight Systems timeline traces comparing naive DDP (per-parameter synchronous all-reduce) with overlapped DDP (async all-reduce via backward hooks), both on the XL model with 1 node x 2 GPUs, seq_len=64.
+
+**Naive DDP**
+
+![Naive DDP timeline](images/ddp-native.png)
+
+| Phase          | Duration (ms) |
+| -------------- | ------------- |
+| forward        | 79.4          |
+| backward       | 128.4         |
+| grad_sync      | 25.9          |
+| optimizer_step | 11.2          |
+
+In the naive trace, NCCL communication kernels appear only during the `grad_sync` phase, after backward computation has fully completed. The compute stream and NCCL stream are active sequentially — no overlap.
+
+**Overlapped DDP**
+
+![Overlapped DDP timeline](images/ddp-overlap.png)
+
+| Phase          | Duration (ms) |
+| -------------- | ------------- |
+| forward        | 78.2          |
+| backward       | 183.5         |
+| grad_sync      | 8.4           |
+| optimizer_step | 11.2          |
+
+In the overlapped trace, NCCL all-reduce operations are launched during backward via `register_post_accumulate_grad_hook`. The `pt_autograd_1` thread shows NCCL activity concurrent with backward compute kernels. The `grad_sync` phase (which only calls `finish_gradient_synchronization`) drops from 25.9 ms to 8.4 ms, confirming that most communication has already completed by the time backward finishes.

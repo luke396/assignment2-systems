@@ -2,6 +2,7 @@
 
 import os
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
 
@@ -10,6 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from cs336_basics.blocks import TransformerLM
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from torch.cuda import nvtx
 
 from cs336_systems.benchmark import generate_random_data
 
@@ -119,6 +121,39 @@ def naive_ddp(batch_size: int = 32, n_procs: int = 8, backend: str = "gloo") -> 
     )
 
 
+def _make_sync_fn(
+    model: torch.nn.Module, *, flat_grad: bool, overlapped: bool
+) -> Callable[[], None]:
+    """Create a gradient sync barrier based on the DDP mode.
+
+    Returns a callable that ensures all ranks have identical averaged gradients
+    before the optimizer step, keeping model parameters in sync across ranks.
+    """
+    if overlapped:
+        assert isinstance(model, DDP)
+        return model.finish_gradient_synchronization
+    if flat_grad:
+
+        def _sync() -> None:
+            grads = [p.grad for p in model.parameters()]
+            flat = _flatten_dense_tensors(grads)
+            dist.all_reduce(flat, op=dist.ReduceOp.AVG)
+            for p, g in zip(
+                model.parameters(),
+                _unflatten_dense_tensors(flat, grads),
+                strict=True,
+            ):
+                p.grad = g
+
+        return _sync
+
+    def _sync_naive() -> None:
+        for param in model.parameters():
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
+    return _sync_naive
+
+
 def _ddp_xl(
     rank: int,
     world_size: int,
@@ -127,6 +162,7 @@ def _ddp_xl(
     backend: str = "nccl",
     *,
     flat_grad: bool = False,
+    overlapped: bool = False,
     d_model: int = 1600,
     d_ff: int = 6400,
     n_heads: int = 25,
@@ -160,31 +196,23 @@ def _ddp_xl(
         n_layers=n_layers,
         device=device,
     )
-    for param in model.parameters():
-        dist.broadcast(param.data, src=0)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    loss_fn = torch.nn.CrossEntropyLoss()
 
-    def _sync_grads() -> None:
-        if flat_grad:
-            grads = [p.grad for p in model.parameters()]
-            flat = _flatten_dense_tensors(grads)
-            dist.all_reduce(flat, op=dist.ReduceOp.AVG)
-            for p, g in zip(
-                model.parameters(),
-                _unflatten_dense_tensors(flat, grads),
-                strict=True,
-            ):
-                p.grad = g
+    with nvtx.range("model_param_init"):
+        if overlapped:
+            model = DDP(model)
         else:
             for param in model.parameters():
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+                dist.broadcast(param.data, src=0)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    sync_grads = _make_sync_fn(model, flat_grad=flat_grad, overlapped=overlapped)
 
     for _i in range(warmup_iters):
         logits = model(data)
         loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
         loss.backward()
-        _sync_grads()
+        sync_grads()
         optimizer.step()
         optimizer.zero_grad()
     torch.cuda.synchronize()
@@ -193,21 +221,23 @@ def _ddp_xl(
     for i in range(iters):
         torch.cuda.synchronize()
         start = time.perf_counter()
-
-        logits = model(data)
-        loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
-        loss.backward()
+        with nvtx.range("forward"):
+            logits = model(data)
+            loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
+        with nvtx.range("backward"):
+            loss.backward()
 
         torch.cuda.synchronize()
         training_time = time.perf_counter()
-
-        _sync_grads()
+        with nvtx.range("grad_sync"):
+            sync_grads()
 
         torch.cuda.synchronize()
         allreduce_time = time.perf_counter()
 
-        optimizer.step()
-        optimizer.zero_grad()
+        with nvtx.range("optimizer_step"):
+            optimizer.step()
+            optimizer.zero_grad()
 
         torch.cuda.synchronize()
         optimizer_time = time.perf_counter()
@@ -232,12 +262,13 @@ def benchmark_ddp_xl(
     seq_len: int = 64,
     *,
     flat_grad: bool = False,
+    overlapped: bool = False,
 ) -> list[dict]:
     """Benchmark DDP training on xl model."""
     ctx = mp.get_context("spawn")
     queue: mp.Queue = ctx.Queue()
     mp.spawn(
-        partial(_ddp_xl, flat_grad=flat_grad),
+        partial(_ddp_xl, flat_grad=flat_grad, overlapped=overlapped),
         args=(n_procs, queue, seq_len, backend),
         nprocs=n_procs,
         join=True,

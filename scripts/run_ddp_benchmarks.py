@@ -33,8 +33,7 @@ def format_results(
             f"| {avg_o:.2f} | {avg_total:.2f} | {pct:.1f}% |"
         )
     rows.extend(
-        f"| {sl} | OOM | OOM | OOM | OOM | OOM |"
-        for sl in sorted(oom_seq_lens or [])
+        f"| {sl} | OOM | OOM | OOM | OOM | OOM |" for sl in sorted(oom_seq_lens or [])
     )
     table = "\n".join(rows)
 
@@ -49,21 +48,25 @@ def format_results(
 
 
 def run_benchmarks(
-    modes: list[tuple[bool, str, str]],
+    modes: list[tuple[bool, bool, str, str]],
     n_procs: int = 2,
     seq_lens: tuple[int, ...] = SEQ_LENS,
 ) -> None:
     """Run DDP benchmarks for given modes and save markdown results."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for use_flat, label, filename in modes:
+    for use_flat, use_overlap, label, filename in modes:
         all_res: list[dict] = []
         oom_seqs: list[int] = []
         for seq in seq_lens:
             print(f"[{label}] Benchmarking seq_len={seq}...")
             try:
                 res = benchmark_ddp_xl(
-                    n_procs=n_procs, backend="nccl", seq_len=seq, flat_grad=use_flat
+                    n_procs=n_procs,
+                    backend="nccl",
+                    seq_len=seq,
+                    flat_grad=use_flat,
+                    overlapped=use_overlap,
                 )
             except Exception as e:
                 if "out of memory" in str(e).lower():
@@ -101,9 +104,10 @@ def main() -> None:
         naive_ddp(batch_size=32, n_procs=8, backend="gloo")
         print("Verification passed.")
 
-    modes: list[tuple[bool, str, str]] = [
-        (False, "Naive", "ddp-xl-naive.md"),
-        (True, "Flat-Grad-Naive", "ddp-xl-naive-flat-grad.md"),
+    modes: list[tuple[bool, bool, str, str]] = [
+        (False, False, "Naive", "ddp-xl-naive.md"),
+        (True, False, "Flat-Grad", "ddp-xl-naive-flat-grad.md"),
+        (False, True, "Overlapped", "ddp-xl-overlapped.md"),
     ]
     run_benchmarks(modes, n_procs=args.n_procs)
 
