@@ -4,6 +4,7 @@ import os
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass, field
 from functools import partial
 
 import torch
@@ -312,3 +313,74 @@ class DDP(torch.nn.Module):
         for h in self.handles:
             h.wait()
         self.handles.clear()
+
+
+@dataclass
+class _Bucket:
+    """Gradient bucket for batched all-reduce communication."""
+
+    params: list[torch.nn.Parameter] = field(default_factory=list)
+    num_ready: int = 0
+    handle: dist.Work | None = None
+    flat_buffer: torch.Tensor | None = None
+
+
+class DDPBucketed(torch.nn.Module):
+    """DDP wrapper with bucketed gradient communication."""
+
+    def __init__(self, module: torch.nn.Module, bucket_size_mb: float) -> None:
+        """Broadcast params from rank 0 and set up gradient buckets."""
+        super().__init__()
+        self.module = module
+        bucket_size_bytes = int(bucket_size_mb * 1024 * 1024)
+
+        cur_bucket_size = 0
+        cur_bucket = _Bucket()
+        self._buckets: list[_Bucket] = []
+
+        for param in reversed(list(self.module.parameters())):
+            dist.broadcast(param.data, src=0)
+            if param.requires_grad:
+                cur_bucket_size += param.numel() * param.element_size()
+                if cur_bucket.params and cur_bucket_size >= bucket_size_bytes:
+                    self._buckets.append(cur_bucket)
+                    cur_bucket = _Bucket()
+                    cur_bucket_size = param.numel() * param.element_size()
+                cur_bucket.params.append(param)
+                param.register_post_accumulate_grad_hook(
+                    partial(self._bucketed_grad_hook, bucket=cur_bucket)
+                )
+        if cur_bucket.params:
+            self._buckets.append(cur_bucket)
+
+    def _bucketed_grad_hook(self, _param: torch.Tensor, bucket: _Bucket) -> None:
+        if bucket.num_ready == len(bucket.params) - 1:
+            grads = [p.grad for p in bucket.params]
+            flat = _flatten_dense_tensors(grads)
+            bucket.handle = dist.all_reduce(flat, op=dist.ReduceOp.AVG, async_op=True)
+            assert bucket.handle is not None
+            bucket.flat_buffer = flat
+        else:
+            bucket.num_ready += 1
+
+    def forward(self, *inputs: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the wrapped module."""
+        return self.module.forward(*inputs, **kwargs)
+
+    def finish_gradient_synchronization(self) -> None:
+        """Wait for all bucket all-reduce ops and write averaged grads back."""
+        for bucket in self._buckets:
+            if bucket.handle is not None:
+                bucket.handle.wait()
+                assert bucket.flat_buffer is not None
+                for p, g in zip(
+                    bucket.params,
+                    _unflatten_dense_tensors(
+                        bucket.flat_buffer, [p.grad for p in bucket.params]
+                    ),
+                    strict=True,
+                ):
+                    p.grad = g
+            bucket.handle = None
+            bucket.flat_buffer = None
+            bucket.num_ready = 0
