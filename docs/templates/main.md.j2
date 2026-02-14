@@ -14,16 +14,18 @@
 
 {% include 'sections/e2e_jit_comparison.md' %}
 
-{% include 'sections/flash_attention_benchmark.md' %}
+{% include 'sections/flash-attention-benchmark.md' %}
 
 ## DDP
 
 {% include 'sections/ddp-allreduce-demo.md' %}
 
-{% include 'sections/ddp-xl.md' %}
+{% include 'sections/ddp-xl-naive.md' %}
 
 {% include 'sections/ddp-xl-naive-flat-grad.md' %}
 
 {% include 'sections/ddp-xl-overlapped.md' %}
 
 {% include 'sections/ddp-nsys.md' %}
+
+{% include 'templates/ddp-bucketed.md' %}

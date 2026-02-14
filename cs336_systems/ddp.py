@@ -3,9 +3,11 @@
 import os
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -13,6 +15,7 @@ import torch.multiprocessing as mp
 from cs336_basics.blocks import TransformerLM
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.cuda import nvtx
+from torch.profiler import ProfilerActivity, schedule
 
 from cs336_systems.benchmark import generate_random_data
 
@@ -123,15 +126,16 @@ def naive_ddp(batch_size: int = 32, n_procs: int = 8, backend: str = "gloo") -> 
 
 
 def _make_sync_fn(
-    model: torch.nn.Module, *, flat_grad: bool, overlapped: bool
+    model: torch.nn.Module,
+    *,
+    flat_grad: bool,
 ) -> Callable[[], None]:
     """Create a gradient sync barrier based on the DDP mode.
 
     Returns a callable that ensures all ranks have identical averaged gradients
     before the optimizer step, keeping model parameters in sync across ranks.
     """
-    if overlapped:
-        assert isinstance(model, DDP)
+    if isinstance(model, (DDP, DDPBucketed)):
         return model.finish_gradient_synchronization
     if flat_grad:
 
@@ -155,6 +159,104 @@ def _make_sync_fn(
     return _sync_naive
 
 
+def _wrap_ddp(
+    model: torch.nn.Module,
+    *,
+    overlapped: bool,
+    bucket_size_mb: float | None,
+) -> torch.nn.Module:
+    """Wrap model with the appropriate DDP strategy."""
+    if overlapped:
+        return DDP(model)
+    if bucket_size_mb is not None:
+        return DDPBucketed(model, bucket_size_mb=bucket_size_mb)
+    for param in model.parameters():
+        dist.broadcast(param.data, src=0)
+    return model
+
+
+def _make_profiler_ctx(
+    profile_dir: str,
+    rank: int,
+    seq_len: int,
+    _warmup_iters: int,
+    iters: int,
+) -> torch.profiler.profile:
+    """Create a torch.profiler context for tracing CUDA/CPU activity."""
+    out = Path(profile_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    return torch.profiler.profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=schedule(wait=0, warmup=1, active=iters - 1, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            str(out / f"rank{rank}_seq{seq_len}"),
+        ),
+        record_shapes=True,
+        with_stack=False,
+    )
+
+
+def _run_measured_iters(
+    model: torch.nn.Module,
+    data: torch.Tensor,
+    loss_fn: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    sync_grads: Callable[[], None],
+    vocab_size: int,
+    iters: int,
+    queue: mp.Queue,
+    rank: int,
+    seq_len: int,
+    prof: torch.profiler.profile | None,
+) -> None:
+    """Run measured training iterations, optionally stepping the profiler."""
+    for i in range(iters):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with nvtx.range("forward"):
+            logits = model(data)
+            loss = loss_fn(
+                logits.view(-1, vocab_size),
+                data.view(-1),
+            )
+
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        with nvtx.range("backward"):
+            loss.backward()
+
+        torch.cuda.synchronize()
+        t2 = time.perf_counter()
+        with nvtx.range("grad_sync"):
+            sync_grads()
+
+        torch.cuda.synchronize()
+        t3 = time.perf_counter()
+        with nvtx.range("optimizer_step"):
+            optimizer.step()
+            optimizer.zero_grad()
+
+        torch.cuda.synchronize()
+        t4 = time.perf_counter()
+        if rank == 0:
+            queue.put(
+                {
+                    "seq_len": seq_len,
+                    "iter": i,
+                    "forward_time": t1 - t0,
+                    "backward_time": t2 - t1,
+                    "allreduce_time": t3 - t2,
+                    "optimizer_time": t4 - t3,
+                    "training_time": t2 - t0,
+                }
+            )
+        if prof is not None:
+            prof.step()
+        torch.cuda.synchronize()
+        dist.barrier()
+
+
 def _ddp_xl(
     rank: int,
     world_size: int,
@@ -164,6 +266,8 @@ def _ddp_xl(
     *,
     flat_grad: bool = False,
     overlapped: bool = False,
+    bucket_size_mb: float | None = None,
+    profile_dir: str | None = None,
     d_model: int = 1600,
     d_ff: int = 6400,
     n_heads: int = 25,
@@ -199,15 +303,15 @@ def _ddp_xl(
     )
 
     with nvtx.range("model_param_init"):
-        if overlapped:
-            model = DDP(model)
-        else:
-            for param in model.parameters():
-                dist.broadcast(param.data, src=0)
+        model = _wrap_ddp(
+            model,
+            overlapped=overlapped,
+            bucket_size_mb=bucket_size_mb,
+        )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss()
-    sync_grads = _make_sync_fn(model, flat_grad=flat_grad, overlapped=overlapped)
+    sync_grads = _make_sync_fn(model, flat_grad=flat_grad)
 
     for _i in range(warmup_iters):
         logits = model(data)
@@ -219,41 +323,32 @@ def _ddp_xl(
     torch.cuda.synchronize()
     dist.barrier()
 
-    for i in range(iters):
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        with nvtx.range("forward"):
-            logits = model(data)
-            loss = loss_fn(logits.view(-1, vocab_size), data.view(-1))
-        with nvtx.range("backward"):
-            loss.backward()
+    prof_ctx = (
+        _make_profiler_ctx(
+            profile_dir,
+            rank,
+            seq_len,
+            warmup_iters,
+            iters,
+        )
+        if profile_dir and rank == 0
+        else nullcontext()
+    )
 
-        torch.cuda.synchronize()
-        training_time = time.perf_counter()
-        with nvtx.range("grad_sync"):
-            sync_grads()
-
-        torch.cuda.synchronize()
-        allreduce_time = time.perf_counter()
-
-        with nvtx.range("optimizer_step"):
-            optimizer.step()
-            optimizer.zero_grad()
-
-        torch.cuda.synchronize()
-        optimizer_time = time.perf_counter()
-        if rank == 0:
-            queue.put(
-                {
-                    "seq_len": seq_len,
-                    "iter": i,
-                    "training_time": training_time - start,
-                    "allreduce_time": allreduce_time - training_time,
-                    "optimizer_time": optimizer_time - allreduce_time,
-                }
-            )
-        torch.cuda.synchronize()
-        dist.barrier()
+    with prof_ctx as prof:
+        _run_measured_iters(
+            model,
+            data,
+            loss_fn,
+            optimizer,
+            sync_grads,
+            vocab_size,
+            iters,
+            queue,
+            rank,
+            seq_len,
+            prof,
+        )
     dist.destroy_process_group()
 
 
@@ -264,12 +359,20 @@ def benchmark_ddp_xl(
     *,
     flat_grad: bool = False,
     overlapped: bool = False,
+    bucket_size_mb: float | None = None,
+    profile_dir: str | None = None,
 ) -> list[dict]:
     """Benchmark DDP training on xl model."""
     ctx = mp.get_context("spawn")
     queue: mp.Queue = ctx.Queue()
     mp.spawn(
-        partial(_ddp_xl, flat_grad=flat_grad, overlapped=overlapped),
+        partial(
+            _ddp_xl,
+            flat_grad=flat_grad,
+            overlapped=overlapped,
+            bucket_size_mb=bucket_size_mb,
+            profile_dir=profile_dir,
+        ),
         args=(n_procs, queue, seq_len, backend),
         nprocs=n_procs,
         join=True,
