@@ -1,3 +1,4 @@
 [submodule "cs336-basics"]
 	path = cs336-basics
 	url = https://github.com/luke396/assignment1-basics
+	branch = archive/main-2026-02-18
