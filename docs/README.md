@@ -4,7 +4,7 @@
 
 ### Basic benchmarking Results
 
-> based on `benchmark_results__5090.md`
+>based on `benchmark_results__5090.md`
 
 | Config | Seq Len | Warmup Steps | d_model |  d_ff | n_layers | num_heads | Status FWD | Status FWD+BWD | Total(s) FWD | Total(s) FWD+BWD | Warmup(s) FWD | Warmup(s) FWD+BWD | Avg/Step(s) FWD | Avg/Step(s) FWD+BWD | Std/Step(s) FWD | Std/Step(s) FWD+BWD |
 | :----- | ------: | -----------: | ------: | ----: | -------: | --------: | :--------- | :------------- | -----------: | ---------------: | ------------: | ----------------: | --------------: | ------------------: | --------------: | ------------------: |
@@ -79,7 +79,7 @@ The first step is cost longer time than the rest. With warm up, the time of trai
 
 ### Nsys Profile Analysis
 
-> based on nsys reports with run tag `new_base`
+>based on nsys reports with run tag `new_base`
 
 #### (a) Forward Pass Timing
 
@@ -186,7 +186,7 @@ xl Top Non-GEMM Kernel per Sequence Length
 
 | Seq Len | Top Non-GEMM Kernel                         | Time% | Total    | Inst |
 | ------- | ------------------------------------------- | ----- | -------- | ---- |
-| seq128  | void at::native::vectorized*elementwise*... | 1.0%  | 11.76 ms | 960  |
+| seq128  | void at::native::vectorized_elementwise_... | 1.0%  | 11.76 ms | 960  |
 | seq256  | OOM                                         | -     | -        | -    |
 | seq512  | OOM                                         | -     | -        | -    |
 | seq1024 | OOM                                         | -     | -        | -    |
@@ -282,6 +282,7 @@ Bigger seq length, softmax time increases faster than matmul time, leading to a 
 
 For one head and one batch, softmax FLOPs per row is 5mn; across attention this is 5 x seq x seq. Computing attention scores is 2 x seq x head_dim x seq, and the final matmul is the same, so total matmul FLOPs is 4 x seq x head_dim x seq. The FLOPs ratio is (5 x seq x seq) : (4 x seq x head_dim x seq) = 5 : (4 x head_dim). In our medium config, head_dim = 64, so the ratio is 5 : 256, about 1.95%.
 
+
 ```shell
 m x (n-1)  get row max
 m x n      minus max
@@ -289,6 +290,7 @@ m x n      exp
 m x (n-1)  get sum
 m x n      divide
 ```
+
 
 The time spent computing softmax is much higher than its FLOPs ratio, likely because softmax is elementwise and memory-bound (more memory traffic), while GEMM kernels are highly optimized and more compute-bound. A possible improvement is to use a fused kernel to avoid intermediate softmax stores/loads, trading a bit more compute for less memory access.
 
@@ -355,41 +357,46 @@ The reason layerNorm remaing float32 is that layerNorm involves reductions (mean
 
 Although BF16 has sufficient dynamic range (same 8 exponent bits as FP32), PyTorch autocast conservatively keeps LayerNorm in float32 for both FP16 and BF16. Theoretically BF16 could be used for LayerNorm, but the precision loss (7 mantissa bits vs 23) may affect training stability.
 
+
 #### Mixed Precision Analysis
 
 ##### Forward Pass Comparison (Median Time in ms)
 
-| Model  | Full Precision | BF16 Mixed | Speedup |
-| ------ | -------------- | ---------- | ------- |
-| small  | 75.89          | 79.35      | 0.96x   |
-| medium | 94.93          | 103.34     | 0.92x   |
-| large  | 115.40         | 123.42     | 0.94x   |
-| xl     | 144.16         | 146.84     | 0.98x   |
-| 2.7B   | 155.02         | 629.84     | 0.25x   |
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 75.89 | 79.35 | 0.96x |
+| medium | 94.93 | 103.34 | 0.92x |
+| large | 115.40 | 123.42 | 0.94x |
+| xl | 144.16 | 146.84 | 0.98x |
+| 2.7B | 155.02 | 629.84 | 0.25x |
+
 
 ##### Forward+Backward Pass Comparison (Median Time in ms)
 
-| Model  | Full Precision | BF16 Mixed | Speedup |
-| ------ | -------------- | ---------- | ------- |
-| small  | 85.71          | 105.35     | 0.81x   |
-| medium | 119.69         | 141.50     | 0.85x   |
-| large  | 156.81         | 180.92     | 0.87x   |
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 85.71 | 105.35 | 0.81x |
+| medium | 119.69 | 141.50 | 0.85x |
+| large | 156.81 | 180.92 | 0.87x |
+
 
 ##### Attention Score Computation (Median Time in ms)
 
-| Model  | Full Precision | BF16 Mixed | Speedup |
-| ------ | -------------- | ---------- | ------- |
-| small  | 0.31           | 0.23       | 1.35x   |
-| medium | 0.24           | 0.19       | 1.27x   |
-| large  | 0.35           | 0.17       | 2.02x   |
-| xl     | 0.56           | 0.18       | 3.07x   |
-| 2.7B   | 1.68           | 0.50       | 3.34x   |
+| Model | Full Precision | BF16 Mixed | Speedup |
+| --- | --- | --- | --- |
+| small | 0.31 | 0.23 | 1.35x |
+| medium | 0.24 | 0.19 | 1.27x |
+| large | 0.35 | 0.17 | 2.02x |
+| xl | 0.56 | 0.18 | 3.07x |
+| 2.7B | 1.68 | 0.50 | 3.34x |
+
 
 ##### Conclusions
 
 1. BF16 mixed precision is slower (5-12%) on small-medium models due to autocast type conversion overhead (copy kernels dominate)
 2. Attention score computation shows 1.2x-3.3x speedup with BF16 larger models benefit more from reduced precision matmul
 3. As model size increases, BF16 disadvantage decreases because compute time dominates conversion overhead
+
 
 ### Profile Memory Usage
 
@@ -408,26 +415,27 @@ Double click the line in the timeline, python frame and corresponding code will 
 #### (b) Table of peak memory usage
 
 | Model Size | Sequence Length | Forward Only Peak Memory (GB) | Forward + Backward Peak Memory (GB) |
-| ---------- | --------------- | ----------------------------- | ----------------------------------- |
-| 2.7B       | 128             | 18.51 GB                      | 57.18 GB                            |
-| 2.7B       | 256             | 25.34 GB                      | 66.09 GB                            |
-| 2.7B       | 512             | 44.17 GB                      | N/A                                 |
+| --- | --- | --- | --- |
+| 2.7B | 128 | 18.51 GB | 57.18 GB |
+| 2.7B | 256 | 25.34 GB | 66.09 GB |
+| 2.7B | 512 | 44.17 GB | N/A |
 
 #### (c) Table of autocast peak memory usage
 
 | Model Size | Sequence Length | Forward Only Peak Memory (GB) | Forward + Backward Peak Memory (GB) |
-| ---------- | --------------- | ----------------------------- | ----------------------------------- |
-| 2.7B       | 128             | 22.76 GB                      | 61.39 GB                            |
-| 2.7B       | 256             | 27.51 GB                      | 66.72 GB                            |
-| 2.7B       | 512             | 39.23 GB                      | N/A                                 |
+| --- | --- | --- | --- |
+| 2.7B | 128 | 22.76 GB | 61.39 GB |
+| 2.7B | 256 | 27.51 GB | 66.72 GB |
+| 2.7B | 512 | 39.23 GB | N/A |
 
 ##### Comparison: Baseline vs Autocast
 
-| Model Size | Seq Len | Baseline FWD | Autocast FWD | Δ FWD             | Baseline FWD+BWD | Autocast FWD+BWD | Δ FWD+BWD        |
-| ---------- | ------- | ------------ | ------------ | ----------------- | ---------------- | ---------------- | ---------------- |
-| 2.7B       | 128     | 18.51 GB     | 22.76 GB     | +4.26 GB (+23.0%) | 57.18 GB         | 61.39 GB         | +4.21 GB (+7.4%) |
-| 2.7B       | 256     | 25.34 GB     | 27.51 GB     | +2.16 GB (+8.5%)  | 66.09 GB         | 66.72 GB         | +0.62 GB (+0.9%) |
-| 2.7B       | 512     | 44.17 GB     | 39.23 GB     | -4.95 GB (-11.2%) | N/A              | N/A              | N/A              |
+| Model Size | Seq Len | Baseline FWD | Autocast FWD | Δ FWD | Baseline FWD+BWD | Autocast FWD+BWD | Δ FWD+BWD |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2.7B | 128 | 18.51 GB | 22.76 GB | +4.26 GB (+23.0%) | 57.18 GB | 61.39 GB | +4.21 GB (+7.4%) |
+| 2.7B | 256 | 25.34 GB | 27.51 GB | +2.16 GB (+8.5%) | 66.09 GB | 66.72 GB | +0.62 GB (+0.9%) |
+| 2.7B | 512 | 44.17 GB | 39.23 GB | -4.95 GB (-11.2%) | N/A | N/A | N/A |
+
 
 Autocast increases memory usage in most cases, contrary to expectations.
 
@@ -435,25 +443,25 @@ Root Cause Analysis: The custom implementations in `cs336_basics/blocks.py`
 prevent autocast from providing benefits:
 
 1. **Custom `Linear` using `einsum`** (blocks.py:48-50)
-    - `einsum` cannot trigger cuBLAS Tensor Core optimizations
-    - PyTorch's `torch.matmul` or `F.linear` would automatically use
-      Tensor Cores under autocast
+   - `einsum` cannot trigger cuBLAS Tensor Core optimizations
+   - PyTorch's `torch.matmul` or `F.linear` would automatically use
+     Tensor Cores under autocast
 
 2. **Custom `scaled_dot_product_attention`** (blocks.py:289-321)
-    - Uses manual `einsum` for Q·K^T and attention·V computations
-    - Does not use `F.scaled_dot_product_attention` which provides
-      FlashAttention/Memory-Efficient Attention
+   - Uses manual `einsum` for Q·K^T and attention·V computations
+   - Does not use `F.scaled_dot_product_attention` which provides
+     FlashAttention/Memory-Efficient Attention
 
 3. **Custom `softmax`** (blocks.py:281-286)
-    - Manual implementation without optimized CUDA kernels
-    - `F.softmax` has fused CUDA implementations
+   - Manual implementation without optimized CUDA kernels
+   - `F.softmax` has fused CUDA implementations
 
 4. **Type Conversion Overhead**
-    - Since custom ops are not recognized as "autocast-eligible",
-      frequent fp32 ↔ bf16 conversions occur
-    - Each `einsum` call may trigger unnecessary dtype casts
-    - Extra memory is allocated for intermediate tensors in different
-      precisions
+   - Since custom ops are not recognized as "autocast-eligible",
+     frequent fp32 ↔ bf16 conversions occur
+   - Each `einsum` call may trigger unnecessary dtype casts
+   - Extra memory is allocated for intermediate tensors in different
+     precisions
 
 Expected vs Actual Flow:
 
@@ -470,7 +478,6 @@ Actual (with custom einsum ops):
 Conclusion:
 
 To benefit from autocast, the model should use PyTorch native operations:
-
 - Replace `einsum` in `Linear` with `F.linear` or `x @ weight.T`
 - Replace custom attention with `F.scaled_dot_product_attention`
 - Replace custom `softmax` with `F.softmax`
@@ -494,114 +501,114 @@ We can see that **activation size scales linearly with seq_length** — when seq
 
 ##### FWD seq128 - Max Single Allocation
 
-| Category   | Baseline | Autocast | Δ (MiB) |
-| ---------- | -------- | -------- | ------- |
-| AttnScores | 8.0 MiB  | 4.0 MiB  | -4.0    |
-| AttnOut    | 8.0 MiB  | 4.0 MiB  | -4.0    |
-| Softmax    | 8.0 MiB  | 8.0 MiB  | 0       |
-| FFN        | 20.0 MiB | 10.0 MiB | -10.0   |
-| Norm       | 5.0 MiB  | 5.0 MiB  | 0       |
-| Embed      | 5.0 MiB  | 5.0 MiB  | 0       |
-| Attn       | 5.0 MiB  | 2.5 MiB  | -2.5    |
-| einsum     | 20.0 MiB | 50.0 MiB | +30.0   |
-| Block      | 5.0 MiB  | 5.0 MiB  | 0       |
+| Category | Baseline | Autocast | Δ (MiB) |
+| --- | --- | --- | --- |
+| AttnScores | 8.0 MiB | 4.0 MiB | -4.0 |
+| AttnOut | 8.0 MiB | 4.0 MiB | -4.0 |
+| Softmax | 8.0 MiB | 8.0 MiB | 0 |
+| FFN | 20.0 MiB | 10.0 MiB | -10.0 |
+| Norm | 5.0 MiB | 5.0 MiB | 0 |
+| Embed | 5.0 MiB | 5.0 MiB | 0 |
+| Attn | 5.0 MiB | 2.5 MiB | -2.5 |
+| einsum | 20.0 MiB | 50.0 MiB | +30.0 |
+| Block | 5.0 MiB | 5.0 MiB | 0 |
 
 ##### FWD seq256 - Max Single Allocation
 
-| Category   | Baseline | Autocast | Δ (MiB) |
-| ---------- | -------- | -------- | ------- |
-| AttnScores | 32.0 MiB | 16.0 MiB | -16.0   |
-| AttnOut    | 32.0 MiB | 16.0 MiB | -16.0   |
-| Softmax    | 32.0 MiB | 32.0 MiB | 0       |
-| FFN        | 40.0 MiB | 20.0 MiB | -20.0   |
-| Norm       | 10.0 MiB | 10.0 MiB | 0       |
-| Embed      | 10.0 MiB | 10.0 MiB | 0       |
-| Attn       | 10.0 MiB | 5.0 MiB  | -5.0    |
-| einsum     | 40.0 MiB | 50.0 MiB | +10.0   |
-| Block      | 10.0 MiB | 10.0 MiB | 0       |
+| Category | Baseline | Autocast | Δ (MiB) |
+| --- | --- | --- | --- |
+| AttnScores | 32.0 MiB | 16.0 MiB | -16.0 |
+| AttnOut | 32.0 MiB | 16.0 MiB | -16.0 |
+| Softmax | 32.0 MiB | 32.0 MiB | 0 |
+| FFN | 40.0 MiB | 20.0 MiB | -20.0 |
+| Norm | 10.0 MiB | 10.0 MiB | 0 |
+| Embed | 10.0 MiB | 10.0 MiB | 0 |
+| Attn | 10.0 MiB | 5.0 MiB | -5.0 |
+| einsum | 40.0 MiB | 50.0 MiB | +10.0 |
+| Block | 10.0 MiB | 10.0 MiB | 0 |
 
 ##### FWD seq512 - Max Single Allocation
 
-| Category   | Baseline  | Autocast  | Δ (MiB) |
-| ---------- | --------- | --------- | ------- |
-| AttnScores | 128.0 MiB | 64.0 MiB  | -64.0   |
-| AttnOut    | 128.0 MiB | 64.0 MiB  | -64.0   |
-| Softmax    | 128.0 MiB | 128.0 MiB | 0       |
-| FFN        | 80.0 MiB  | 40.0 MiB  | -40.0   |
-| Norm       | 20.0 MiB  | 20.0 MiB  | 0       |
-| Embed      | 20.0 MiB  | 20.0 MiB  | 0       |
-| Attn       | 20.0 MiB  | 10.0 MiB  | -10.0   |
-| einsum     | 128.0 MiB | 64.0 MiB  | -64.0   |
-| Block      | 20.0 MiB  | 20.0 MiB  | 0       |
+| Category | Baseline | Autocast | Δ (MiB) |
+| --- | --- | --- | --- |
+| AttnScores | 128.0 MiB | 64.0 MiB | -64.0 |
+| AttnOut | 128.0 MiB | 64.0 MiB | -64.0 |
+| Softmax | 128.0 MiB | 128.0 MiB | 0 |
+| FFN | 80.0 MiB | 40.0 MiB | -40.0 |
+| Norm | 20.0 MiB | 20.0 MiB | 0 |
+| Embed | 20.0 MiB | 20.0 MiB | 0 |
+| Attn | 20.0 MiB | 10.0 MiB | -10.0 |
+| einsum | 128.0 MiB | 64.0 MiB | -64.0 |
+| Block | 20.0 MiB | 20.0 MiB | 0 |
 
 ##### FWD_BWD seq128 - Max Single Allocation
 
-| Category   | Baseline  | Autocast  | Δ (MiB) |
-| ---------- | --------- | --------- | ------- |
-| Gradient   | 100.0 MiB | 100.0 MiB | 0       |
-| Opt State  | 100.0 MiB | 100.0 MiB | 0       |
-| AttnScores | 8.0 MiB   | 4.0 MiB   | -4.0    |
-| AttnOut    | 8.0 MiB   | 4.0 MiB   | -4.0    |
-| Softmax    | 8.0 MiB   | 8.0 MiB   | 0       |
-| FFN        | 20.0 MiB  | 10.0 MiB  | -10.0   |
-| Norm       | 5.0 MiB   | 5.0 MiB   | 0       |
-| Embed      | 5.0 MiB   | 5.0 MiB   | 0       |
-| Attn       | 5.0 MiB   | 2.5 MiB   | -2.5    |
-| einsum     | 20.0 MiB  | 50.0 MiB  | +30.0   |
-| Block      | 5.0 MiB   | 5.0 MiB   | 0       |
+| Category | Baseline | Autocast | Δ (MiB) |
+| --- | --- | --- | --- |
+| Gradient | 100.0 MiB | 100.0 MiB | 0 |
+| Opt State | 100.0 MiB | 100.0 MiB | 0 |
+| AttnScores | 8.0 MiB | 4.0 MiB | -4.0 |
+| AttnOut | 8.0 MiB | 4.0 MiB | -4.0 |
+| Softmax | 8.0 MiB | 8.0 MiB | 0 |
+| FFN | 20.0 MiB | 10.0 MiB | -10.0 |
+| Norm | 5.0 MiB | 5.0 MiB | 0 |
+| Embed | 5.0 MiB | 5.0 MiB | 0 |
+| Attn | 5.0 MiB | 2.5 MiB | -2.5 |
+| einsum | 20.0 MiB | 50.0 MiB | +30.0 |
+| Block | 5.0 MiB | 5.0 MiB | 0 |
 
 ##### FWD_BWD seq256 - Max Single Allocation
 
-| Category   | Baseline  | Autocast  | Δ (MiB) |
-| ---------- | --------- | --------- | ------- |
-| Gradient   | 100.0 MiB | 100.0 MiB | 0       |
-| Opt State  | 100.0 MiB | 100.0 MiB | 0       |
-| AttnScores | 32.0 MiB  | 16.0 MiB  | -16.0   |
-| AttnOut    | 32.0 MiB  | 16.0 MiB  | -16.0   |
-| Softmax    | 32.0 MiB  | 32.0 MiB  | 0       |
-| FFN        | 40.0 MiB  | 20.0 MiB  | -20.0   |
-| Norm       | 10.0 MiB  | 10.0 MiB  | 0       |
-| Embed      | 10.0 MiB  | 10.0 MiB  | 0       |
-| Attn       | 10.0 MiB  | 5.0 MiB   | -5.0    |
-| einsum     | 40.0 MiB  | 50.0 MiB  | +10.0   |
-| Block      | 10.0 MiB  | 10.0 MiB  | 0       |
+| Category | Baseline | Autocast | Δ (MiB) |
+| --- | --- | --- | --- |
+| Gradient | 100.0 MiB | 100.0 MiB | 0 |
+| Opt State | 100.0 MiB | 100.0 MiB | 0 |
+| AttnScores | 32.0 MiB | 16.0 MiB | -16.0 |
+| AttnOut | 32.0 MiB | 16.0 MiB | -16.0 |
+| Softmax | 32.0 MiB | 32.0 MiB | 0 |
+| FFN | 40.0 MiB | 20.0 MiB | -20.0 |
+| Norm | 10.0 MiB | 10.0 MiB | 0 |
+| Embed | 10.0 MiB | 10.0 MiB | 0 |
+| Attn | 10.0 MiB | 5.0 MiB | -5.0 |
+| einsum | 40.0 MiB | 50.0 MiB | +10.0 |
+| Block | 10.0 MiB | 10.0 MiB | 0 |
 
 ##### Top 10 Allocations: baseline FWD_BWD seq256
 
-| #   | Size      | Category | Operation      | Call Chain |
-| --- | --------- | -------- | -------------- | ---------- |
-| 1   | 100.0 MiB | Other    | unknown        | Internal   |
-| 2   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
-| 3   | 100.0 MiB | Other    | unknown        | Internal   |
-| 4   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
-| 5   | 100.0 MiB | Other    | unknown        | Internal   |
-| 6   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
-| 7   | 100.0 MiB | Other    | unknown        | Internal   |
-| 8   | 100.0 MiB | Gradient | clone_for_grad | Internal   |
-| 9   | 100.0 MiB | Other    | unknown        | Internal   |
-| 10  | 100.0 MiB | Gradient | clone_for_grad | Internal   |
+| # | Size | Category | Operation | Call Chain |
+| --- | --- | --- | --- | --- |
+| 1 | 100.0 MiB | Other | unknown | Internal |
+| 2 | 100.0 MiB | Gradient | clone_for_grad | Internal |
+| 3 | 100.0 MiB | Other | unknown | Internal |
+| 4 | 100.0 MiB | Gradient | clone_for_grad | Internal |
+| 5 | 100.0 MiB | Other | unknown | Internal |
+| 6 | 100.0 MiB | Gradient | clone_for_grad | Internal |
+| 7 | 100.0 MiB | Other | unknown | Internal |
+| 8 | 100.0 MiB | Gradient | clone_for_grad | Internal |
+| 9 | 100.0 MiB | Other | unknown | Internal |
+| 10 | 100.0 MiB | Gradient | clone_for_grad | Internal |
 
 ##### Key Findings
 
 1. **Attention scores scale quadratically**: The Q·K^T computation
    (AttnScores) creates large activation allocations that scale with O(seq^2):
-    - seq128: 8 MiB baseline (batch x heads x 128 x 128 x 4 bytes)
-    - seq256: 32 MiB baseline (4x increase for 2x seq)
-    - seq512: 128 MiB baseline (4x increase for 2x seq)
+   - seq128: 8 MiB baseline (batch x heads x 128 x 128 x 4 bytes)
+   - seq256: 32 MiB baseline (4x increase for 2x seq)
+   - seq512: 128 MiB baseline (4x increase for 2x seq)
 
 2. **Gradient and optimizer state are fixed-size**: The largest single
    allocations (~100 MiB each) come from:
-    - Gradient accumulation (AccumulateGrad) for embedding/projection layers
-    - Optimizer state initialization (zeros_like) for Adam's m and v buffers
-    - These scale with model parameters, not sequence length
+   - Gradient accumulation (AccumulateGrad) for embedding/projection layers
+   - Optimizer state initialization (zeros_like) for Adam's m and v buffers
+   - These scale with model parameters, not sequence length
 
 3. **FFN allocations scale linearly**: Feed-forward network activations
    scale with O(batch x seq x d_ff):
-    - seq128: 20 MiB, seq256: 40 MiB, seq512: 80 MiB
+   - seq128: 20 MiB, seq256: 40 MiB, seq512: 80 MiB
 
 4. **Autocast reduces most activation sizes by ~50%**: With bf16:
-    - AttnScores, AttnOut, FFN, Attn all halve in size
-    - Softmax, Norm, Embed, Block unchanged (forced fp32 or unaffected)
+   - AttnScores, AttnOut, FFN, Attn all halve in size
+   - Softmax, Norm, Embed, Block unchanged (forced fp32 or unaffected)
 
 5. **einsum increases under autocast**: The einsum category shows +30 MiB
    increase at seq128, likely due to dtype conversion buffers created
@@ -718,369 +725,527 @@ FlashAttention maintains O(n²) time complexity but reduces **memory complexity 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.058   | 0.015        | 3.79x             |
-| 256     | 0.058   | 0.019        | 3.04x             |
-| 512     | 0.072   | 0.027        | 2.71x             |
-| 1024    | 0.071   | 0.052        | 1.38x             |
-| 2048    | 0.158   | 0.075        | 2.09x             |
-| 4096    | 0.588   | 0.158        | 3.73x             |
-| 8192    | 2.245   | 0.414        | 5.42x             |
-| 16384   | 8.226   | 1.314        | 6.26x             |
-| 32768   | 36.504  | 4.471        | 8.17x             |
-| 65536   | OOM     | 17.054       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.058 | 0.015 | 3.79x |
+| 256 | 0.058 | 0.019 | 3.04x |
+| 512 | 0.072 | 0.027 | 2.71x |
+| 1024 | 0.071 | 0.052 | 1.38x |
+| 2048 | 0.158 | 0.075 | 2.09x |
+| 4096 | 0.588 | 0.158 | 3.73x |
+| 8192 | 2.245 | 0.414 | 5.42x |
+| 16384 | 8.226 | 1.314 | 6.26x |
+| 32768 | 36.504 | 4.471 | 8.17x |
+| 65536 | OOM | 17.054 | — |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.061   | 0.017        | 3.69x             |
-| 256     | 0.062   | 0.022        | 2.83x             |
-| 512     | 0.067   | 0.033        | 2.04x             |
-| 1024    | 0.073   | 0.054        | 1.36x             |
-| 2048    | 0.161   | 0.099        | 1.62x             |
-| 4096    | 0.614   | 0.205        | 2.99x             |
-| 8192    | 2.357   | 0.513        | 4.59x             |
-| 16384   | 8.645   | 1.642        | 5.26x             |
-| 32768   | 38.162  | 5.548        | 6.88x             |
-| 65536   | OOM     | 20.456       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.061 | 0.017 | 3.69x |
+| 256 | 0.062 | 0.022 | 2.83x |
+| 512 | 0.067 | 0.033 | 2.04x |
+| 1024 | 0.073 | 0.054 | 1.36x |
+| 2048 | 0.161 | 0.099 | 1.62x |
+| 4096 | 0.614 | 0.205 | 2.99x |
+| 8192 | 2.357 | 0.513 | 4.59x |
+| 16384 | 8.645 | 1.642 | 5.26x |
+| 32768 | 38.162 | 5.548 | 6.88x |
+| 65536 | OOM | 20.456 | — |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.060   | 0.018        | 3.31x             |
-| 256     | 0.072   | 0.025        | 2.85x             |
-| 512     | 0.072   | 0.037        | 1.95x             |
-| 1024    | 0.085   | 0.062        | 1.37x             |
-| 2048    | 0.191   | 0.118        | 1.63x             |
-| 4096    | 0.724   | 0.256        | 2.83x             |
-| 8192    | 2.803   | 0.662        | 4.23x             |
-| 16384   | 10.724  | 2.193        | 4.89x             |
-| 32768   | 45.252  | 7.499        | 6.03x             |
-| 65536   | OOM     | 28.908       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.060 | 0.018 | 3.31x |
+| 256 | 0.072 | 0.025 | 2.85x |
+| 512 | 0.072 | 0.037 | 1.95x |
+| 1024 | 0.085 | 0.062 | 1.37x |
+| 2048 | 0.191 | 0.118 | 1.63x |
+| 4096 | 0.724 | 0.256 | 2.83x |
+| 8192 | 2.803 | 0.662 | 4.23x |
+| 16384 | 10.724 | 2.193 | 4.89x |
+| 32768 | 45.252 | 7.499 | 6.03x |
+| 65536 | OOM | 28.908 | — |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.056   | 0.020        | 2.86x             |
-| 256     | 0.067   | 0.027        | 2.45x             |
-| 512     | 0.072   | 0.043        | 1.70x             |
-| 1024    | 0.111   | 0.074        | 1.50x             |
-| 2048    | 0.249   | 0.144        | 1.72x             |
-| 4096    | 0.958   | 0.339        | 2.82x             |
-| 8192    | 3.748   | 1.051        | 3.57x             |
-| 16384   | 14.540  | 3.508        | 4.14x             |
-| 32768   | 60.180  | 12.577       | 4.79x             |
-| 65536   | OOM     | 53.697       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.056 | 0.020 | 2.86x |
+| 256 | 0.067 | 0.027 | 2.45x |
+| 512 | 0.072 | 0.043 | 1.70x |
+| 1024 | 0.111 | 0.074 | 1.50x |
+| 2048 | 0.249 | 0.144 | 1.72x |
+| 4096 | 0.958 | 0.339 | 2.82x |
+| 8192 | 3.748 | 1.051 | 3.57x |
+| 16384 | 14.540 | 3.508 | 4.14x |
+| 32768 | 60.180 | 12.577 | 4.79x |
+| 65536 | OOM | 53.697 | — |
 
 #### Backward Latency — fp32 (ms)
 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.107   | 0.165        | 0.65x             |
-| 256     | 0.118   | 0.171        | 0.69x             |
-| 512     | 0.134   | 0.177        | 0.76x             |
-| 1024    | 0.170   | 0.184        | 0.92x             |
-| 2048    | 0.230   | 0.262        | 0.88x             |
-| 4096    | 0.819   | 0.558        | 1.47x             |
-| 8192    | 3.093   | 1.466        | 2.11x             |
-| 16384   | 12.172  | 5.193        | 2.34x             |
-| 32768   | 48.466  | 18.714       | 2.59x             |
-| 65536   | OOM     | 71.993       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.107 | 0.165 | 0.65x |
+| 256 | 0.118 | 0.171 | 0.69x |
+| 512 | 0.134 | 0.177 | 0.76x |
+| 1024 | 0.170 | 0.184 | 0.92x |
+| 2048 | 0.230 | 0.262 | 0.88x |
+| 4096 | 0.819 | 0.558 | 1.47x |
+| 8192 | 3.093 | 1.466 | 2.11x |
+| 16384 | 12.172 | 5.193 | 2.34x |
+| 32768 | 48.466 | 18.714 | 2.59x |
+| 65536 | OOM | 71.993 | — |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.122   | 0.168        | 0.73x             |
-| 256     | 0.122   | 0.166        | 0.74x             |
-| 512     | 0.147   | 0.177        | 0.83x             |
-| 1024    | 0.132   | 0.190        | 0.69x             |
-| 2048    | 0.236   | 0.265        | 0.89x             |
-| 4096    | 0.842   | 0.570        | 1.48x             |
-| 8192    | 3.068   | 1.565        | 1.96x             |
-| 16384   | 12.761  | 5.671        | 2.25x             |
-| 32768   | 50.409  | 20.580       | 2.45x             |
-| 65536   | OOM     | 79.770       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.122 | 0.168 | 0.73x |
+| 256 | 0.122 | 0.166 | 0.74x |
+| 512 | 0.147 | 0.177 | 0.83x |
+| 1024 | 0.132 | 0.190 | 0.69x |
+| 2048 | 0.236 | 0.265 | 0.89x |
+| 4096 | 0.842 | 0.570 | 1.48x |
+| 8192 | 3.068 | 1.565 | 1.96x |
+| 16384 | 12.761 | 5.671 | 2.25x |
+| 32768 | 50.409 | 20.580 | 2.45x |
+| 65536 | OOM | 79.770 | — |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.121   | 0.166        | 0.73x             |
-| 256     | 0.143   | 0.179        | 0.80x             |
-| 512     | 0.132   | 0.194        | 0.68x             |
-| 1024    | 0.133   | 0.189        | 0.70x             |
-| 2048    | 0.291   | 0.357        | 0.82x             |
-| 4096    | 1.084   | 0.804        | 1.35x             |
-| 8192    | 4.198   | 2.976        | 1.41x             |
-| 16384   | 16.652  | 9.772        | 1.70x             |
-| 32768   | 64.851  | 35.373       | 1.83x             |
-| 65536   | OOM     | 146.229      | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.121 | 0.166 | 0.73x |
+| 256 | 0.143 | 0.179 | 0.80x |
+| 512 | 0.132 | 0.194 | 0.68x |
+| 1024 | 0.133 | 0.189 | 0.70x |
+| 2048 | 0.291 | 0.357 | 0.82x |
+| 4096 | 1.084 | 0.804 | 1.35x |
+| 8192 | 4.198 | 2.976 | 1.41x |
+| 16384 | 16.652 | 9.772 | 1.70x |
+| 32768 | 64.851 | 35.373 | 1.83x |
+| 65536 | OOM | 146.229 | — |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.115   | 0.165        | 0.70x             |
-| 256     | 0.160   | 0.179        | 0.89x             |
-| 512     | 0.164   | 0.272        | 0.60x             |
-| 1024    | 0.164   | 0.254        | 0.65x             |
-| 2048    | 0.451   | 0.543        | 0.83x             |
-| 4096    | 1.612   | 1.394        | 1.16x             |
-| 8192    | 5.986   | 4.569        | 1.31x             |
-| 16384   | 24.174  | 18.326       | 1.32x             |
-| 32768   | 93.975  | 67.608       | 1.39x             |
-| 65536   | OOM     | 261.649      | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.115 | 0.165 | 0.70x |
+| 256 | 0.160 | 0.179 | 0.89x |
+| 512 | 0.164 | 0.272 | 0.60x |
+| 1024 | 0.164 | 0.254 | 0.65x |
+| 2048 | 0.451 | 0.543 | 0.83x |
+| 4096 | 1.612 | 1.394 | 1.16x |
+| 8192 | 5.986 | 4.569 | 1.31x |
+| 16384 | 24.174 | 18.326 | 1.32x |
+| 32768 | 93.975 | 67.608 | 1.39x |
+| 65536 | OOM | 261.649 | — |
 
 #### End-to-End Latency — fp32 (ms)
 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.406   | 0.390        | 1.04x             |
-| 256     | 0.433   | 0.378        | 1.15x             |
-| 512     | 0.465   | 0.409        | 1.14x             |
-| 1024    | 0.516   | 0.394        | 1.31x             |
-| 2048    | 0.484   | 0.417        | 1.16x             |
-| 4096    | 1.420   | 0.667        | 2.13x             |
-| 8192    | 5.353   | 1.861        | 2.88x             |
-| 16384   | 20.386  | 6.513        | 3.13x             |
-| 32768   | 85.024  | 23.092       | 3.68x             |
-| 65536   | OOM     | 90.568       | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.406 | 0.390 | 1.04x |
+| 256 | 0.433 | 0.378 | 1.15x |
+| 512 | 0.465 | 0.409 | 1.14x |
+| 1024 | 0.516 | 0.394 | 1.31x |
+| 2048 | 0.484 | 0.417 | 1.16x |
+| 4096 | 1.420 | 0.667 | 2.13x |
+| 8192 | 5.353 | 1.861 | 2.88x |
+| 16384 | 20.386 | 6.513 | 3.13x |
+| 32768 | 85.024 | 23.092 | 3.68x |
+| 65536 | OOM | 90.568 | — |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.474   | 0.378        | 1.25x             |
-| 256     | 0.438   | 0.394        | 1.11x             |
-| 512     | 0.476   | 0.391        | 1.22x             |
-| 1024    | 0.463   | 0.404        | 1.15x             |
-| 2048    | 0.477   | 0.419        | 1.14x             |
-| 4096    | 1.468   | 0.754        | 1.95x             |
-| 8192    | 5.440   | 2.078        | 2.62x             |
-| 16384   | 21.423  | 7.266        | 2.95x             |
-| 32768   | 88.584  | 25.950       | 3.41x             |
-| 65536   | OOM     | 100.027      | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.474 | 0.378 | 1.25x |
+| 256 | 0.438 | 0.394 | 1.11x |
+| 512 | 0.476 | 0.391 | 1.22x |
+| 1024 | 0.463 | 0.404 | 1.15x |
+| 2048 | 0.477 | 0.419 | 1.14x |
+| 4096 | 1.468 | 0.754 | 1.95x |
+| 8192 | 5.440 | 2.078 | 2.62x |
+| 16384 | 21.423 | 7.266 | 2.95x |
+| 32768 | 88.584 | 25.950 | 3.41x |
+| 65536 | OOM | 100.027 | — |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.437   | 0.374        | 1.17x             |
-| 256     | 0.493   | 0.397        | 1.24x             |
-| 512     | 0.505   | 0.425        | 1.19x             |
-| 1024    | 0.462   | 0.399        | 1.16x             |
-| 2048    | 0.507   | 0.458        | 1.11x             |
-| 4096    | 1.823   | 1.072        | 1.70x             |
-| 8192    | 7.023   | 3.256        | 2.16x             |
-| 16384   | 27.325  | 11.381       | 2.40x             |
-| 32768   | 110.509 | 41.200       | 2.68x             |
-| 65536   | OOM     | 161.908      | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.437 | 0.374 | 1.17x |
+| 256 | 0.493 | 0.397 | 1.24x |
+| 512 | 0.505 | 0.425 | 1.19x |
+| 1024 | 0.462 | 0.399 | 1.16x |
+| 2048 | 0.507 | 0.458 | 1.11x |
+| 4096 | 1.823 | 1.072 | 1.70x |
+| 8192 | 7.023 | 3.256 | 2.16x |
+| 16384 | 27.325 | 11.381 | 2.40x |
+| 32768 | 110.509 | 41.200 | 2.68x |
+| 65536 | OOM | 161.908 | — |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.438   | 0.383        | 1.14x             |
-| 256     | 0.478   | 0.395        | 1.21x             |
-| 512     | 0.406   | 0.405        | 1.00x             |
-| 1024    | 0.461   | 0.404        | 1.14x             |
-| 2048    | 0.718   | 0.675        | 1.06x             |
-| 4096    | 2.590   | 1.753        | 1.48x             |
-| 8192    | 9.758   | 5.547        | 1.76x             |
-| 16384   | 38.682  | 20.159       | 1.92x             |
-| 32768   | 153.742 | 73.957       | 2.08x             |
-| 65536   | OOM     | 304.008      | —                 |
+| --- | --- | --- | --- |
+| 128 | 0.438 | 0.383 | 1.14x |
+| 256 | 0.478 | 0.395 | 1.21x |
+| 512 | 0.406 | 0.405 | 1.00x |
+| 1024 | 0.461 | 0.404 | 1.14x |
+| 2048 | 0.718 | 0.675 | 1.06x |
+| 4096 | 2.590 | 1.753 | 1.48x |
+| 8192 | 9.758 | 5.547 | 1.76x |
+| 16384 | 38.682 | 20.159 | 1.92x |
+| 32768 | 153.742 | 73.957 | 2.08x |
+| 65536 | OOM | 304.008 | — |
 
 #### Forward Latency — bf16 (ms)
 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.065   | 0.014        | 4.50x             |
-| 256     | 0.082   | 0.018        | 4.49x             |
-| 512     | 0.067   | 0.023        | 2.95x             |
-| 1024    | 0.069   | 0.036        | 1.92x             |
-| 2048    | 0.109   | 0.062        | 1.75x             |
-| 4096    | 0.390   | 0.119        | 3.28x             |
-| 8192    | 1.520   | 0.308        | 4.93x             |
-| 16384   | 4.875   | 0.914        | 5.34x             |
-| 32768   | 19.436  | 3.287        | 5.91x             |
-| 65536   | 80.681  | 12.434       | 6.49x             |
+| --- | --- | --- | --- |
+| 128 | 0.065 | 0.014 | 4.50x |
+| 256 | 0.082 | 0.018 | 4.49x |
+| 512 | 0.067 | 0.023 | 2.95x |
+| 1024 | 0.069 | 0.036 | 1.92x |
+| 2048 | 0.109 | 0.062 | 1.75x |
+| 4096 | 0.390 | 0.119 | 3.28x |
+| 8192 | 1.520 | 0.308 | 4.93x |
+| 16384 | 4.875 | 0.914 | 5.34x |
+| 32768 | 19.436 | 3.287 | 5.91x |
+| 65536 | 80.681 | 12.434 | 6.49x |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.068   | 0.017        | 3.98x             |
-| 256     | 0.068   | 0.023        | 2.96x             |
-| 512     | 0.070   | 0.034        | 2.02x             |
-| 1024    | 0.068   | 0.058        | 1.17x             |
-| 2048    | 0.109   | 0.106        | 1.03x             |
-| 4096    | 0.390   | 0.212        | 1.84x             |
-| 8192    | 1.520   | 0.478        | 3.18x             |
-| 16384   | 4.906   | 1.295        | 3.79x             |
-| 32768   | 19.556  | 4.533        | 4.31x             |
-| 65536   | 81.182  | 16.413       | 4.95x             |
+| --- | --- | --- | --- |
+| 128 | 0.068 | 0.017 | 3.98x |
+| 256 | 0.068 | 0.023 | 2.96x |
+| 512 | 0.070 | 0.034 | 2.02x |
+| 1024 | 0.068 | 0.058 | 1.17x |
+| 2048 | 0.109 | 0.106 | 1.03x |
+| 4096 | 0.390 | 0.212 | 1.84x |
+| 8192 | 1.520 | 0.478 | 3.18x |
+| 16384 | 4.906 | 1.295 | 3.79x |
+| 32768 | 19.556 | 4.533 | 4.31x |
+| 65536 | 81.182 | 16.413 | 4.95x |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.065   | 0.017        | 3.90x             |
-| 256     | 0.142   | 0.022        | 6.38x             |
-| 512     | 0.068   | 0.033        | 2.08x             |
-| 1024    | 0.061   | 0.055        | 1.12x             |
-| 2048    | 0.111   | 0.099        | 1.12x             |
-| 4096    | 0.399   | 0.205        | 1.95x             |
-| 8192    | 1.561   | 0.496        | 3.14x             |
-| 16384   | 5.011   | 1.552        | 3.23x             |
-| 32768   | 19.884  | 5.247        | 3.79x             |
-| 65536   | 82.544  | 19.176       | 4.30x             |
+| --- | --- | --- | --- |
+| 128 | 0.065 | 0.017 | 3.90x |
+| 256 | 0.142 | 0.022 | 6.38x |
+| 512 | 0.068 | 0.033 | 2.08x |
+| 1024 | 0.061 | 0.055 | 1.12x |
+| 2048 | 0.111 | 0.099 | 1.12x |
+| 4096 | 0.399 | 0.205 | 1.95x |
+| 8192 | 1.561 | 0.496 | 3.14x |
+| 16384 | 5.011 | 1.552 | 3.23x |
+| 32768 | 19.884 | 5.247 | 3.79x |
+| 65536 | 82.544 | 19.176 | 4.30x |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.068   | 0.020        | 3.50x             |
-| 256     | 0.065   | 0.025        | 2.57x             |
-| 512     | 0.062   | 0.040        | 1.55x             |
-| 1024    | 0.064   | 0.066        | 0.96x             |
-| 2048    | 0.117   | 0.126        | 0.94x             |
-| 4096    | 0.418   | 0.267        | 1.57x             |
-| 8192    | 1.605   | 0.659        | 2.44x             |
-| 16384   | 5.206   | 2.135        | 2.44x             |
-| 32768   | 20.675  | 7.342        | 2.82x             |
-| 65536   | 88.074  | 27.879       | 3.16x             |
+| --- | --- | --- | --- |
+| 128 | 0.068 | 0.020 | 3.50x |
+| 256 | 0.065 | 0.025 | 2.57x |
+| 512 | 0.062 | 0.040 | 1.55x |
+| 1024 | 0.064 | 0.066 | 0.96x |
+| 2048 | 0.117 | 0.126 | 0.94x |
+| 4096 | 0.418 | 0.267 | 1.57x |
+| 8192 | 1.605 | 0.659 | 2.44x |
+| 16384 | 5.206 | 2.135 | 2.44x |
+| 32768 | 20.675 | 7.342 | 2.82x |
+| 65536 | 88.074 | 27.879 | 3.16x |
 
 #### Backward Latency — bf16 (ms)
 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.135   | 0.193        | 0.70x             |
-| 256     | 0.133   | 0.178        | 0.75x             |
-| 512     | 0.121   | 0.169        | 0.72x             |
-| 1024    | 0.137   | 0.180        | 0.76x             |
-| 2048    | 0.139   | 0.182        | 0.76x             |
-| 4096    | 0.447   | 0.300        | 1.49x             |
-| 8192    | 1.470   | 0.841        | 1.75x             |
-| 16384   | 5.427   | 3.022        | 1.80x             |
-| 32768   | 23.053  | 10.909       | 2.11x             |
-| 65536   | 88.720  | 42.799       | 2.07x             |
+| --- | --- | --- | --- |
+| 128 | 0.135 | 0.193 | 0.70x |
+| 256 | 0.133 | 0.178 | 0.75x |
+| 512 | 0.121 | 0.169 | 0.72x |
+| 1024 | 0.137 | 0.180 | 0.76x |
+| 2048 | 0.139 | 0.182 | 0.76x |
+| 4096 | 0.447 | 0.300 | 1.49x |
+| 8192 | 1.470 | 0.841 | 1.75x |
+| 16384 | 5.427 | 3.022 | 1.80x |
+| 32768 | 23.053 | 10.909 | 2.11x |
+| 65536 | 88.720 | 42.799 | 2.07x |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.128   | 0.185        | 0.69x             |
-| 256     | 0.131   | 0.178        | 0.74x             |
-| 512     | 0.127   | 0.167        | 0.76x             |
-| 1024    | 0.137   | 0.184        | 0.75x             |
-| 2048    | 0.128   | 0.186        | 0.68x             |
-| 4096    | 0.416   | 0.286        | 1.46x             |
-| 8192    | 1.434   | 0.812        | 1.76x             |
-| 16384   | 5.377   | 2.984        | 1.80x             |
-| 32768   | 22.244  | 10.758       | 2.07x             |
-| 65536   | 89.037  | 41.849       | 2.13x             |
+| --- | --- | --- | --- |
+| 128 | 0.128 | 0.185 | 0.69x |
+| 256 | 0.131 | 0.178 | 0.74x |
+| 512 | 0.127 | 0.167 | 0.76x |
+| 1024 | 0.137 | 0.184 | 0.75x |
+| 2048 | 0.128 | 0.186 | 0.68x |
+| 4096 | 0.416 | 0.286 | 1.46x |
+| 8192 | 1.434 | 0.812 | 1.76x |
+| 16384 | 5.377 | 2.984 | 1.80x |
+| 32768 | 22.244 | 10.758 | 2.07x |
+| 65536 | 89.037 | 41.849 | 2.13x |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.128   | 0.166        | 0.77x             |
-| 256     | 0.142   | 0.172        | 0.82x             |
-| 512     | 0.121   | 0.171        | 0.71x             |
-| 1024    | 0.127   | 0.195        | 0.65x             |
-| 2048    | 0.129   | 0.185        | 0.70x             |
-| 4096    | 0.428   | 0.387        | 1.10x             |
-| 8192    | 1.469   | 1.129        | 1.30x             |
-| 16384   | 5.495   | 4.136        | 1.33x             |
-| 32768   | 22.751  | 15.045       | 1.51x             |
-| 65536   | 90.811  | 60.100       | 1.51x             |
+| --- | --- | --- | --- |
+| 128 | 0.128 | 0.166 | 0.77x |
+| 256 | 0.142 | 0.172 | 0.82x |
+| 512 | 0.121 | 0.171 | 0.71x |
+| 1024 | 0.127 | 0.195 | 0.65x |
+| 2048 | 0.129 | 0.185 | 0.70x |
+| 4096 | 0.428 | 0.387 | 1.10x |
+| 8192 | 1.469 | 1.129 | 1.30x |
+| 16384 | 5.495 | 4.136 | 1.33x |
+| 32768 | 22.751 | 15.045 | 1.51x |
+| 65536 | 90.811 | 60.100 | 1.51x |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.133   | 0.181        | 0.73x             |
-| 256     | 0.120   | 0.166        | 0.72x             |
-| 512     | 0.113   | 0.167        | 0.68x             |
-| 1024    | 0.127   | 0.182        | 0.70x             |
-| 2048    | 0.133   | 0.250        | 0.53x             |
-| 4096    | 0.461   | 0.606        | 0.76x             |
-| 8192    | 1.548   | 1.884        | 0.82x             |
-| 16384   | 5.699   | 6.826        | 0.83x             |
-| 32768   | 23.563  | 26.401       | 0.89x             |
-| 65536   | 96.677  | 105.184      | 0.92x             |
+| --- | --- | --- | --- |
+| 128 | 0.133 | 0.181 | 0.73x |
+| 256 | 0.120 | 0.166 | 0.72x |
+| 512 | 0.113 | 0.167 | 0.68x |
+| 1024 | 0.127 | 0.182 | 0.70x |
+| 2048 | 0.133 | 0.250 | 0.53x |
+| 4096 | 0.461 | 0.606 | 0.76x |
+| 8192 | 1.548 | 1.884 | 0.82x |
+| 16384 | 5.699 | 6.826 | 0.83x |
+| 32768 | 23.563 | 26.401 | 0.89x |
+| 65536 | 96.677 | 105.184 | 0.92x |
 
 #### End-to-End Latency — bf16 (ms)
 
 **d_model = 16**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.450   | 0.403        | 1.12x             |
-| 256     | 0.488   | 0.415        | 1.18x             |
-| 512     | 0.449   | 0.383        | 1.17x             |
-| 1024    | 0.469   | 0.405        | 1.16x             |
-| 2048    | 0.470   | 0.406        | 1.16x             |
-| 4096    | 0.843   | 0.446        | 1.89x             |
-| 8192    | 2.989   | 1.194        | 2.50x             |
-| 16384   | 10.312  | 4.066        | 2.54x             |
-| 32768   | 42.497  | 14.598       | 2.91x             |
-| 65536   | 169.147 | 56.405       | 3.00x             |
+| --- | --- | --- | --- |
+| 128 | 0.450 | 0.403 | 1.12x |
+| 256 | 0.488 | 0.415 | 1.18x |
+| 512 | 0.449 | 0.383 | 1.17x |
+| 1024 | 0.469 | 0.405 | 1.16x |
+| 2048 | 0.470 | 0.406 | 1.16x |
+| 4096 | 0.843 | 0.446 | 1.89x |
+| 8192 | 2.989 | 1.194 | 2.50x |
+| 16384 | 10.312 | 4.066 | 2.54x |
+| 32768 | 42.497 | 14.598 | 2.91x |
+| 65536 | 169.147 | 56.405 | 3.00x |
 
 **d_model = 32**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.469   | 0.385        | 1.22x             |
-| 256     | 0.568   | 0.391        | 1.45x             |
-| 512     | 0.450   | 0.384        | 1.17x             |
-| 1024    | 0.474   | 0.400        | 1.18x             |
-| 2048    | 0.461   | 0.410        | 1.12x             |
-| 4096    | 0.808   | 0.529        | 1.53x             |
-| 8192    | 2.955   | 1.356        | 2.18x             |
-| 16384   | 10.289  | 4.470        | 2.30x             |
-| 32768   | 41.761  | 15.963       | 2.62x             |
-| 65536   | 169.458 | 60.772       | 2.79x             |
+| --- | --- | --- | --- |
+| 128 | 0.469 | 0.385 | 1.22x |
+| 256 | 0.568 | 0.391 | 1.45x |
+| 512 | 0.450 | 0.384 | 1.17x |
+| 1024 | 0.474 | 0.400 | 1.18x |
+| 2048 | 0.461 | 0.410 | 1.12x |
+| 4096 | 0.808 | 0.529 | 1.53x |
+| 8192 | 2.955 | 1.356 | 2.18x |
+| 16384 | 10.289 | 4.470 | 2.30x |
+| 32768 | 41.761 | 15.963 | 2.62x |
+| 65536 | 169.458 | 60.772 | 2.79x |
 
 **d_model = 64**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.454   | 0.408        | 1.11x             |
-| 256     | 0.587   | 0.396        | 1.48x             |
-| 512     | 0.450   | 0.381        | 1.18x             |
-| 1024    | 0.457   | 0.419        | 1.09x             |
-| 2048    | 0.466   | 0.418        | 1.11x             |
-| 4096    | 0.834   | 0.667        | 1.25x             |
-| 8192    | 3.035   | 1.764        | 1.72x             |
-| 16384   | 10.517  | 6.217        | 1.69x             |
-| 32768   | 42.642  | 22.418       | 1.90x             |
-| 65536   | 173.428 | 86.300       | 2.01x             |
+| --- | --- | --- | --- |
+| 128 | 0.454 | 0.408 | 1.11x |
+| 256 | 0.587 | 0.396 | 1.48x |
+| 512 | 0.450 | 0.381 | 1.18x |
+| 1024 | 0.457 | 0.419 | 1.09x |
+| 2048 | 0.466 | 0.418 | 1.11x |
+| 4096 | 0.834 | 0.667 | 1.25x |
+| 8192 | 3.035 | 1.764 | 1.72x |
+| 16384 | 10.517 | 6.217 | 1.69x |
+| 32768 | 42.642 | 22.418 | 1.90x |
+| 65536 | 173.428 | 86.300 | 2.01x |
 
 **d_model = 128**
 
 | seq_len | regular | triton_flash | triton vs regular |
-| ------- | ------- | ------------ | ----------------- |
-| 128     | 0.467   | 0.386        | 1.21x             |
-| 256     | 0.449   | 0.389        | 1.15x             |
-| 512     | 0.439   | 0.424        | 1.03x             |
-| 1024    | 0.464   | 0.416        | 1.12x             |
-| 2048    | 0.467   | 0.425        | 1.10x             |
-| 4096    | 0.887   | 0.963        | 0.92x             |
-| 8192    | 3.153   | 2.909        | 1.08x             |
-| 16384   | 10.931  | 10.075       | 1.09x             |
-| 32768   | 44.463  | 36.310       | 1.22x             |
-| 65536   | 184.540 | 144.382      | 1.28x             |
+| --- | --- | --- | --- |
+| 128 | 0.467 | 0.386 | 1.21x |
+| 256 | 0.449 | 0.389 | 1.15x |
+| 512 | 0.439 | 0.424 | 1.03x |
+| 1024 | 0.464 | 0.416 | 1.12x |
+| 2048 | 0.467 | 0.425 | 1.10x |
+| 4096 | 0.887 | 0.963 | 0.92x |
+| 8192 | 3.153 | 2.909 | 1.08x |
+| 16384 | 10.931 | 10.075 | 1.09x |
+| 32768 | 44.463 | 36.310 | 1.22x |
+| 65536 | 184.540 | 144.382 | 1.28x |
+
+
+## DDP
+
+### distributed_communication_single_node
+
+![All-Reduce Benchmark](images/all_reduce_benchmark.png)
+
+| Backend | Data Size | 2 procs | 4 procs | 6 procs |
+|---------|-----------|---------|---------|---------|
+| Gloo+CPU | 1 MB | 1.14 ms | 1.94 ms | 3.07 ms |
+| Gloo+CPU | 10 MB | 9.10 ms | 12.97 ms | 15.72 ms |
+| Gloo+CPU | 100 MB | 93.26 ms | 127.92 ms | 145.69 ms |
+| Gloo+CPU | 1 GB | 851.30 ms | 2251.83 ms | 1947.31 ms |
+| NCCL+GPU | 1 MB | 0.09 ms | 0.20 ms | 0.28 ms |
+| NCCL+GPU | 10 MB | 0.46 ms | 0.70 ms | 0.74 ms |
+| NCCL+GPU | 100 MB | 3.63 ms | 6.29 ms | 6.87 ms |
+| NCCL+GPU | 1 GB | 33.47 ms | 63.21 ms | 70.07 ms |
+
+NCCL+GPU is consistently 10–25x faster than Gloo+CPU across all configurations, thanks to high-bandwidth GPU interconnects (NVLink). 
+
+Both backends show roughly linear latency scaling with data size, confirming that all-reduce is bandwidth-bound for large messages. Increasing the process count raises latency moderately, with similar relative scaling across both backends—consistent with the ring all-reduce algorithm whose communication volume scales as `2·(N−1)/N · data_size`.
+
+One anomaly is the Gloo 1 GB case where 6 processes (1947 ms) is slightly faster than 4 processes (2252 ms), likely due to measurement variance at only 5 iterations.
+
+### Naive DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 96.31 | 184.12 | 394.45 | 97.68 | 772.57 | 51.1% |
+| 96 | 103.29 | 194.07 | 388.18 | 97.04 | 782.58 | 49.6% |
+| 128 | 112.06 | 199.68 | 390.89 | 97.78 | 800.41 | 48.8% |
+| 256 | 172.44 | 318.63 | 389.79 | 97.50 | 978.36 | 39.8% |
+| 512 | 303.44 | 656.79 | 390.25 | 97.40 | 1447.88 | 27.0% |
+| 1024 | 632.90 | 1388.38 | 390.43 | 96.70 | 2508.41 | 15.6% |
+
+### Flat-Grad DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 102.73 | 193.85 | 376.62 | 96.78 | 769.98 | 48.9% |
+| 96 | 100.89 | 206.29 | 376.06 | 96.54 | 779.78 | 48.2% |
+| 128 | 109.02 | 194.59 | 374.26 | 96.30 | 774.17 | 48.3% |
+| 256 | 166.15 | 317.11 | 377.28 | 96.18 | 956.73 | 39.4% |
+| 512 | 304.43 | 656.58 | 378.66 | 96.48 | 1436.16 | 26.4% |
+| 1024 | OOM | OOM | OOM | OOM | OOM | OOM |
+
+### Overlapped DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 96.98 | 417.91 | 6.68 | 96.12 | 617.70 | 1.1% |
+| 96 | 101.63 | 429.78 | 8.09 | 96.06 | 635.55 | 1.3% |
+| 128 | 110.56 | 439.60 | 8.25 | 96.38 | 654.78 | 1.3% |
+| 256 | 166.55 | 528.59 | 8.25 | 96.43 | 799.82 | 1.0% |
+| 512 | 302.85 | 838.52 | 8.27 | 96.46 | 1246.10 | 0.7% |
+| 1024 | 633.37 | 1539.31 | 8.29 | 97.12 | 2278.10 | 0.4% |
+
+### DDP Nsight Systems Profiling (Naive vs Overlapped)
+
+Below are Nsight Systems timeline traces comparing naive DDP (per-parameter synchronous all-reduce) with overlapped DDP (async all-reduce via backward hooks), both on the XL model with 1 node x 2 GPUs, seq_len=64.
+
+**Naive DDP**
+
+![Naive DDP timeline](images/ddp-native.png)
+
+| Phase          | Duration (ms) |
+| -------------- | ------------- |
+| forward        | 79.4          |
+| backward       | 128.4         |
+| grad_sync      | 25.9          |
+| optimizer_step | 11.2          |
+
+In the naive trace, NCCL communication kernels appear only during the `grad_sync` phase, after backward computation has fully completed. The compute stream and NCCL stream are active sequentially — no overlap.
+
+**Overlapped DDP**
+
+![Overlapped DDP timeline](images/ddp-overlap.png)
+
+| Phase          | Duration (ms) |
+| -------------- | ------------- |
+| forward        | 78.2          |
+| backward       | 183.5         |
+| grad_sync      | 8.4           |
+| optimizer_step | 11.2          |
+
+In the overlapped trace, NCCL all-reduce operations are launched during backward via `register_post_accumulate_grad_hook`. The `pt_autograd_1` thread shows NCCL activity concurrent with backward compute kernels. The `grad_sync` phase (which only calls `finish_gradient_synchronization`) drops from 25.9 ms to 8.4 ms, confirming that most communication has already completed by the time backward finishes.
+
+
+### Bucketed (1MB) DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 97.71 | 416.44 | 12.25 | 96.11 | 622.52 | 2.0% |
+| 96 | 102.37 | 427.88 | 13.01 | 95.89 | 639.15 | 2.0% |
+| 128 | 111.42 | 438.18 | 13.04 | 96.00 | 658.64 | 2.0% |
+| 256 | 164.34 | 528.76 | 12.42 | 95.92 | 801.45 | 1.5% |
+| 512 | 302.55 | 838.89 | 12.76 | 96.04 | 1250.24 | 1.0% |
+| 1024 | 633.60 | 1536.96 | 15.09 | 96.95 | 2282.60 | 0.7% |
+
+
+### Bucketed (10MB) DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 98.95 | 414.21 | 11.38 | 96.08 | 620.62 | 1.8% |
+| 96 | 100.48 | 424.50 | 11.64 | 95.93 | 632.54 | 1.8% |
+| 128 | 114.68 | 439.13 | 13.23 | 96.46 | 663.50 | 2.0% |
+| 256 | 166.49 | 528.52 | 12.14 | 96.09 | 803.24 | 1.5% |
+| 512 | 303.17 | 838.91 | 12.42 | 96.63 | 1251.13 | 1.0% |
+| 1024 | 633.80 | 1536.18 | 13.28 | 96.52 | 2279.78 | 0.6% |
+
+
+### Bucketed (100MB) DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 101.06 | 401.95 | 7.10 | 96.17 | 606.29 | 1.2% |
+| 96 | 102.18 | 415.17 | 7.51 | 96.10 | 620.96 | 1.2% |
+| 128 | 110.01 | 442.24 | 8.57 | 96.17 | 656.98 | 1.3% |
+| 256 | 169.17 | 535.15 | 8.01 | 96.54 | 808.87 | 1.0% |
+| 512 | 303.51 | 843.79 | 7.53 | 96.61 | 1251.45 | 0.6% |
+| 1024 | 633.28 | 1537.09 | 8.44 | 96.21 | 2275.02 | 0.4% |
+
+
+### Bucketed (1000MB) DDP Benchmark (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Fwd (ms) | Bwd (ms) | AllReduce (ms) | Optimizer (ms) | Total (ms) | Comm % |
+|---------|---------|---------|----------------|----------------|------------|--------|
+| 64 | 99.73 | 414.50 | 5.18 | 96.08 | 615.49 | 0.8% |
+| 96 | 102.74 | 428.27 | 5.81 | 95.97 | 632.79 | 0.9% |
+| 128 | 108.03 | 442.66 | 4.42 | 95.76 | 650.88 | 0.7% |
+| 256 | 167.25 | 540.79 | 5.12 | 96.06 | 809.21 | 0.6% |
+| 512 | 303.11 | 850.38 | 6.27 | 96.26 | 1256.02 | 0.5% |
+| 1024 | 633.08 | 1568.79 | 6.35 | 96.16 | 2304.39 | 0.3% |
+
+
+
+### Bucketed DDP Comparison (XL, 1 Node x 2 GPUs)
+
+| Seq Len | Naive (ms) | Overlapped (ms) | Bucketed (1MB) (ms) | Bucketed (10MB) (ms) | Bucketed (100MB) (ms) | Bucketed (1000MB) (ms) |
+|---------|-----------|----------------|--------------------|---------------------|----------------------|-----------------------|
+| 64 | 772.57 | 617.70 | 622.52 | 620.62 | 606.29 | 615.49 |
+| 96 | 782.58 | 635.55 | 639.15 | 632.54 | 620.96 | 632.79 |
+| 128 | 800.41 | 654.78 | 658.64 | 663.50 | 656.98 | 650.88 |
+| 256 | 978.36 | 799.82 | 801.45 | 803.24 | 808.87 | 809.21 |
+| 512 | 1447.88 | 1246.10 | 1250.24 | 1251.13 | 1251.45 | 1256.02 |
+| 1024 | 2508.41 | 2278.10 | 2282.60 | 2279.78 | 2275.02 | 2304.39 |
+
+![Bucketed DDP comparison](images/ddp-xl-bucketed.png)
+
+**Analysis.** Across all bucket sizes (1–1000 MB), bucketed DDP achieves nearly identical total iteration time, and all variants closely match per-parameter overlapped DDP. This is expected: the total communication volume is fixed regardless of bucket granularity, and the effective iteration time is dominated by max(backward compute, AllReduce). On 2 GPUs with NVLink, AllReduce takes ~390 ms while backward ranges from ~184 ms (seq=64) to ~1388 ms (seq=1024), so at short sequences communication is the bottleneck and at long sequences it is fully hidden behind compute — leaving little room for bucket size to matter.
+
+**Why speedup percentage decreases with longer sequences.** The chart shows ~20% speedup at seq=64 but only ~9% at seq=1024. This is not because the DDP overhead grows — the residual AllReduce time after backward stays roughly constant (~7–8 ms for overlapped). Rather, the absolute time saved by overlapping is bounded by min(AllReduce, Backward): at seq=64 (Bwd=184 ms < AllReduce=390 ms) only ~155 ms can be hidden, while at seq=1024 (Bwd=1388 ms > AllReduce=390 ms) communication is fully hidden, saving ~230 ms. The absolute savings actually increase, but total iteration time grows much faster (772 ms → 2508 ms), so the percentage speedup = savings / total shrinks. In short, AllReduce is a fixed ~390 ms cost independent of sequence length; as compute grows, communication becomes a smaller fraction of total time, diluting the relative benefit of overlap.
+
+The minor differences between overlapped and bucketed stem from two opposing effects. Per-parameter overlapped DDP launches all-reduce immediately per gradient, maximizing the overlap window; bucketed DDP must wait for the last parameter in each bucket before flattening and launching, slightly delaying communication start. Conversely, bucketed DDP issues fewer NCCL calls, reducing launch overhead. These effects largely cancel out in our 2-GPU NVLink setup.
+
+**Why bucket size doesn't matter here — and when it would.** Assuming per-bucket gradient compute time equals the bandwidth-limited transfer time, the DDP overhead (time spent waiting after backward) can be modeled as `Overhead(n_b) = s/(n_b·w) + n_b·o`, where s is total parameter size, w is all-reduce bandwidth, o is per-call launch overhead, and n_b is the number of buckets. The first term (last bucket's transfer) shrinks with more buckets; the second term (accumulated launch overhead) grows. The optimal bucket count is `n_b* = √(s/(w·o))`, giving optimal bucket size `b* = √(s·w·o)` and minimum overhead `2√(s·o/w)`. On NVLink, o is on the order of microseconds and w is hundreds of GB/s, so the minimum overhead `2√(s·o/w)` is inherently tiny. Moreover, both terms of the overhead function are small for any reasonable n_b — the curve is extremely flat. This explains why 1 MB vs 1000 MB buckets yield virtually identical results. To make bucket size the dominant factor, one would need to increase o (cross-node Ethernet/InfiniBand raises per-call latency to ~100 μs–ms), increase the number of GPUs (more rounds per all-reduce call), or use a smaller model (reducing s so that the launch-overhead term becomes a significant fraction).

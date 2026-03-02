@@ -199,7 +199,8 @@ def _benchmark_attention_impl(
     return result
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run attention benchmarks and save results."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results = []
     jit = True
@@ -233,3 +234,7 @@ if __name__ == "__main__":
     with output_file.open("w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {output_file}")
+
+
+if __name__ == "__main__":
+    main()
